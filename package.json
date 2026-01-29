@@ -1,5 +1,6 @@
 {
   "name": "tgt-discord-bot",
+  "type": "module",
   "version": "1.0.0",
   "description": "Discord automation bot for The Ghana Trader (Paystack-powered premium access)",
   "main": "index.js",
