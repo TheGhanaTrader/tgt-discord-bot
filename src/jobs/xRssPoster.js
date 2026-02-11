@@ -3,6 +3,7 @@
 
 const fs = require("fs");
 const path = require("path");
+const { postToX } = require("../services/xClient");
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const STATE_FILE = path.join(DATA_DIR, "x-feed.json");
@@ -102,6 +103,7 @@ async function tick(client) {
 
   const msg = `📊 **New X post**: ${latest.title}\n${latest.link}`;
   await ch.send(msg).catch(() => null);
+  await postToX(msg).catch((e) => console.log("X_POST_ERR:", e?.message || e));
 
   state.lastGuid = latest.guid;
   writeState(state);
