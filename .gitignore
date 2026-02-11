@@ -16,3 +16,13 @@ Thumbs.db
 .vscode
 data/
 
+# local junk
+ngrok.exe
+backup_data/
+assets/
+
+# env + secrets
+.env
+.env.*
+data/
+*.log
