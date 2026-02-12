@@ -9,8 +9,8 @@ const { createCanvas, loadImage } = require("canvas");
 const DATA_DIR = path.join(process.cwd(), "data");
 const CERT_DIR = path.join(DATA_DIR, "certificates");
 
-const BG_PATH = path.join(DATA_DIR, "certificate-bg.png");
-const LOGO_PATH = path.join(DATA_DIR, "tgt-logo.png");
+const BG_PATH = path.join(process.cwd(), "assets", "branding", "certificate-bg.png");
+const LOGO_PATH = path.join(process.cwd(), "assets", "branding", "tgt-logo.png");
 
 if (!fs.existsSync(CERT_DIR)) fs.mkdirSync(CERT_DIR, { recursive: true });
 
