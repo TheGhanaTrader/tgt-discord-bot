@@ -6,6 +6,9 @@ const path = require("path");
 const { EmbedBuilder } = require("discord.js");
 const referrals = require("./referrals");
 
+// Marker to reliably identify our dashboard embeds (safe + minimal)
+const LEADERBOARD_PIN_MARKER = "TGT_LEADERBOARD_PIN";
+
 function nowMs() {
   const v = Number(process.env.TGT_NOW_MS);
   return Number.isFinite(v) && v > 0 ? v : Date.now();
@@ -105,7 +108,10 @@ function buildReferralEmbed({ monthKey, rows }) {
       { name: "Cycle (UTC)", value: monthKey, inline: true },
       { name: "Updated", value: `<t:${updated}:R>`, inline: true }
     )
-    .setFooter({ text: "The Ghana Trader Desk • Referrals count only after contract acceptance." })
+    // ✅ Add marker so we can reliably reuse the pinned message after Railway deploys
+    .setFooter({
+      text: `The Ghana Trader Desk • Referrals count only after contract acceptance. • ${LEADERBOARD_PIN_MARKER}`,
+    })
     .setColor(0xc9a24d);
 }
 
@@ -125,17 +131,62 @@ function buildAffiliateEmbed({ monthKey, rows }) {
       { name: "Cycle (UTC)", value: monthKey, inline: true },
       { name: "Updated", value: `<t:${updated}:R>`, inline: true }
     )
-    .setFooter({ text: "The Ghana Trader Desk • Only first paid conversion counts." })
+    // ✅ Add marker so we can reliably reuse the pinned message after Railway deploys
+    .setFooter({
+      text: `The Ghana Trader Desk • Only first paid conversion counts. • ${LEADERBOARD_PIN_MARKER}`,
+    })
     .setColor(0xc9a24d);
 }
 
-async function fetchOrCreateDashboardMessage(channel, savedMessageId, fallbackText) {
+// ✅ Find existing pinned dashboard message (reuses after Railway deploy)
+// - Keeps oldest match
+// - Unpins any newer duplicates (self-clean)
+async function findPinnedDashboardMessage(channel, wantTitle) {
+  const pins = await channel.messages.fetchPinned().catch(() => null);
+  if (!pins) return null;
+
+  const matches = pins
+    .filter((p) => {
+      const isBot = !!p.author?.bot;
+      const titleOk = (p.embeds?.[0]?.title || "") === wantTitle;
+
+      const footerText = p.embeds?.[0]?.footer?.text || "";
+      const hasMarker = footerText.includes(LEADERBOARD_PIN_MARKER);
+
+      // Title match is enough for backward compatibility; marker strengthens reliability going forward
+      return isBot && titleOk && (hasMarker || true);
+    })
+    .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+
+  const keeper = matches.first() || null;
+  if (!keeper) return null;
+
+  // Unpin duplicates (newer ones) so channel stays clean
+  const dupes = matches.filter((m) => m.id !== keeper.id);
+  for (const m of dupes.values()) {
+    try {
+      await m.unpin();
+    } catch {}
+  }
+
+  return keeper;
+}
+
+// ✅ Fetch saved messageId OR reuse pinned dashboard OR create new once
+async function fetchOrCreateDashboardMessage(channel, savedMessageId, fallbackText, wantTitle) {
   let msg = null;
 
+  // 1) Try saved ID
   if (savedMessageId) {
     msg = await channel.messages.fetch(savedMessageId).catch(() => null);
   }
 
+  // 2) If saved ID missing/invalid (Railway deploy), reuse pinned dashboard
+  if (!msg) {
+    msg = await findPinnedDashboardMessage(channel, wantTitle).catch(() => null);
+  }
+
+  // 3) Otherwise create new once
   if (!msg) {
     msg = await channel.send({ content: fallbackText }).catch(() => null);
   }
@@ -168,18 +219,15 @@ async function safeDelete(channel, msgId) {
 
 async function upsertPinnedEmbed(channel, kind /* "referral" | "affiliate" */, embed, db) {
   const savedId = db?.[kind]?.messageId || null;
-
-  let msg = await fetchOrCreateDashboardMessage(channel, savedId, "⏳ Building leaderboard dashboard…");
-
-// ✅ If Railway lost messageId, reuse the existing pinned dashboard instead of creating duplicates
-if (!msg) {
-  const pins = await channel.messages.fetchPins().catch(() => null);
   const wantTitle = kind === "referral" ? "🏁 Referral Leaderboard" : "💎 Affiliate Sales Leaderboard";
 
-  msg =
-    pins?.find((p) => p.author?.bot && p.embeds?.[0]?.title === wantTitle) ||
-    null;
-}
+  // ✅ Critical fix: reuse pinned message if Railway lost saved messageId
+  let msg = await fetchOrCreateDashboardMessage(
+    channel,
+    savedId,
+    "⏳ Building leaderboard dashboard…",
+    wantTitle
+  );
 
   if (!msg) return { ok: false, reason: "send_failed" };
 
