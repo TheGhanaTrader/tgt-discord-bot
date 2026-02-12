@@ -145,24 +145,40 @@ async function findPinnedDashboardMessage(channel, wantTitle) {
   const pins = await channel.messages.fetchPinned().catch(() => null);
   if (!pins) return null;
 
-  const matches = pins
+  // First pass: strict match (title + marker)
+  const strict = pins
     .filter((p) => {
       if (!p.author?.bot) return false;
-
       const title = p.embeds?.[0]?.title || "";
       if (title !== wantTitle) return false;
-
       const footerText = p.embeds?.[0]?.footer?.text || "";
       return footerText.includes(LEADERBOARD_PIN_MARKER);
     })
     .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
 
-  const keeper = matches.first() || null;
+  let keeper = strict.first() || null;
+
+  // Fallback: title-only (for legacy pins created before marker existed)
+  if (!keeper) {
+    const legacy = pins
+      .filter((p) => {
+        if (!p.author?.bot) return false;
+        const title = p.embeds?.[0]?.title || "";
+        return title === wantTitle;
+      })
+      .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
+
+    keeper = legacy.first() || null;
+  }
+
   if (!keeper) return null;
 
-  const dupes = matches.filter((m) => m.id !== keeper.id);
-  for (const m of dupes.values()) {
-    try { await m.unpin(); } catch {}
+  // Unpin other dashboard pins for this title (keeps the channel clean)
+  for (const p of pins.values()) {
+    if (p.id === keeper.id) continue;
+    const title = p.embeds?.[0]?.title || "";
+    if (title !== wantTitle) continue;
+    try { await p.unpin(); } catch {}
   }
 
   return keeper;
