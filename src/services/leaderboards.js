@@ -169,7 +169,18 @@ async function safeDelete(channel, msgId) {
 async function upsertPinnedEmbed(channel, kind /* "referral" | "affiliate" */, embed, db) {
   const savedId = db?.[kind]?.messageId || null;
 
-  const msg = await fetchOrCreateDashboardMessage(channel, savedId, "⏳ Building leaderboard dashboard…");
+  let msg = await fetchOrCreateDashboardMessage(channel, savedId, "⏳ Building leaderboard dashboard…");
+
+// ✅ If Railway lost messageId, reuse the existing pinned dashboard instead of creating duplicates
+if (!msg) {
+  const pins = await channel.messages.fetchPins().catch(() => null);
+  const wantTitle = kind === "referral" ? "🏁 Referral Leaderboard" : "💎 Affiliate Sales Leaderboard";
+
+  msg =
+    pins?.find((p) => p.author?.bot && p.embeds?.[0]?.title === wantTitle) ||
+    null;
+}
+
   if (!msg) return { ok: false, reason: "send_failed" };
 
   await msg.edit({ content: "", embeds: [embed] }).catch(() => null);
