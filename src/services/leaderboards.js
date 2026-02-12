@@ -324,6 +324,7 @@ async function archiveIfDue(client, db) {
 }
 
 async function refreshLeaderboards(client) {
+    console.log("TGT_LB_TICK");
   const refChanId = String(process.env.REF_LEADERBOARD_CHANNEL_ID || "").trim();
   const affChanId = String(process.env.AFF_LEADERBOARD_CHANNEL_ID || "").trim();
   if (!refChanId || !affChanId) {
@@ -400,6 +401,7 @@ function startLeaderboardDashboards(client, opts = {}) {
 
   _timer = setInterval(() => {
     refreshLeaderboards(client).catch(() => null);
+    console.log("TGT_LB_TIMER_RUNNING");
   }, everyMs);
 
   console.log("✅ Leaderboard dashboards: ACTIVE (auto-refresh)");
