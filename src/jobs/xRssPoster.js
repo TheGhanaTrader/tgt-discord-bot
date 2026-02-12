@@ -4,6 +4,7 @@
 const fs = require("fs");
 const path = require("path");
 const { postToX } = require("../services/xClient");
+const { getLatestTweetByUsername } = require("../services/xClient");
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const STATE_FILE = path.join(DATA_DIR, "x-feed.json");
@@ -70,8 +71,8 @@ function parseLatestItem(xml) {
 
 async function tick(client) {
   const channelId = String(process.env.X_FEED_CHANNEL_ID || "").trim();
-  const rssUrl = String(process.env.X_RSS_URL || "").trim();
-  if (!channelId || !rssUrl) return;
+  const username = String(process.env.X_USERNAME || "").trim();
+  if (!channelId || !username) return;
 
   const ch =
     client.channels.cache.get(channelId) ||
@@ -80,35 +81,26 @@ async function tick(client) {
 
   const state = readState();
 
-  let xml;
-  try {
-    xml = await fetchText(rssUrl);
-  } catch (e) {
-    console.log("X_RSS_FETCH_ERR:", e?.message || e);
-    return;
-  }
-
-  const latest = parseLatestItem(xml);
+  const latest = await getLatestTweetByUsername(username).catch(() => null);
   if (!latest) return;
 
   if (!state.initialized) {
     state.initialized = true;
-    state.lastGuid = latest.guid;
+    state.lastGuid = latest.id;
     writeState(state);
-    console.log("✅ X_FEED_INITIALIZED:", latest.guid);
+    console.log("✅ X_FEED_INITIALIZED:", latest.id);
     return;
   }
 
-  if (state.lastGuid === latest.guid) return;
+  if (state.lastGuid === latest.id) return;
 
-  const msg = `📊 **New X post**: ${latest.title}\n${latest.link}`;
+  const msg = `📊 **New X post**:\n${latest.text}`;
   await ch.send(msg).catch(() => null);
-  await postToX(msg).catch((e) => console.log("X_POST_ERR:", e?.message || e));
 
-  state.lastGuid = latest.guid;
+  state.lastGuid = latest.id;
   writeState(state);
 
-  console.log("✅ X_FEED_POSTED:", latest.guid);
+  console.log("✅ X_FEED_POSTED:", latest.id);
 }
 
 let _timer = null;
