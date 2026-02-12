@@ -1,3 +1,4 @@
+// src/services/xClient.js
 "use strict";
 
 const { TwitterApi } = require("twitter-api-v2");
@@ -10,9 +11,30 @@ const client = new TwitterApi({
 });
 
 async function postToX(text) {
-  const tweet = text.length > 280 ? text.slice(0, 277) + "…" : text;
-  await client.v2.tweet(tweet);
+  const tweet = String(text || "");
+  const safe = tweet.length > 280 ? tweet.slice(0, 277) + "…" : tweet;
+  await client.v2.tweet(safe);
   console.log("✅ X_POST_SUCCESS");
 }
 
-module.exports = { postToX };
+async function getLatestTweetByUsername(username) {
+  const u = String(username || "").replace(/^@/, "").trim();
+  if (!u) return null;
+
+  const user = await client.v2.userByUsername(u);
+  const userId = user?.data?.id;
+  if (!userId) return null;
+
+  const timeline = await client.v2.userTimeline(userId, {
+    max_results: 5,
+    "tweet.fields": ["created_at"],
+    exclude: ["replies", "retweets"],
+  });
+
+  const t = timeline?.data?.data?.[0];
+  if (!t?.id || !t?.text) return null;
+
+  return { id: t.id, text: t.text };
+}
+
+module.exports = { postToX, getLatestTweetByUsername };
