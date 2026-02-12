@@ -155,7 +155,7 @@ async function findPinnedDashboardMessage(channel, wantTitle) {
       const footerText = p.embeds?.[0]?.footer?.text || "";
       return footerText.includes(LEADERBOARD_PIN_MARKER);
     })
-    .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
+    .sort((a, b) => b.createdTimestamp - a.createdTimestamp);
 
   const keeper = matches.first() || null;
   if (!keeper) return null;
