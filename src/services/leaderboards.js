@@ -147,26 +147,22 @@ async function findPinnedDashboardMessage(channel, wantTitle) {
 
   const matches = pins
     .filter((p) => {
-      const isBot = !!p.author?.bot;
-      const titleOk = (p.embeds?.[0]?.title || "") === wantTitle;
+      if (!p.author?.bot) return false;
+
+      const title = p.embeds?.[0]?.title || "";
+      if (title !== wantTitle) return false;
 
       const footerText = p.embeds?.[0]?.footer?.text || "";
-      const hasMarker = footerText.includes(LEADERBOARD_PIN_MARKER);
-
-      // Title match is enough for backward compatibility; marker strengthens reliability going forward
-      return isBot && titleOk && (hasMarker || true);
+      return footerText.includes(LEADERBOARD_PIN_MARKER);
     })
     .sort((a, b) => a.createdTimestamp - b.createdTimestamp);
 
   const keeper = matches.first() || null;
   if (!keeper) return null;
 
-  // Unpin duplicates (newer ones) so channel stays clean
   const dupes = matches.filter((m) => m.id !== keeper.id);
   for (const m of dupes.values()) {
-    try {
-      await m.unpin();
-    } catch {}
+    try { await m.unpin(); } catch {}
   }
 
   return keeper;
@@ -174,24 +170,18 @@ async function findPinnedDashboardMessage(channel, wantTitle) {
 
 // ✅ Fetch saved messageId OR reuse pinned dashboard OR create new once
 async function fetchOrCreateDashboardMessage(channel, savedMessageId, fallbackText, wantTitle) {
-  let msg = null;
-
-  // 1) Try saved ID
+  // 1) Try saved messageId
   if (savedMessageId) {
-    msg = await channel.messages.fetch(savedMessageId).catch(() => null);
+    const byId = await channel.messages.fetch(savedMessageId).catch(() => null);
+    if (byId) return byId;
   }
 
-  // 2) If saved ID missing/invalid (Railway deploy), reuse pinned dashboard
-  if (!msg) {
-    msg = await findPinnedDashboardMessage(channel, wantTitle).catch(() => null);
-  }
+  // 2) Try pinned dashboard (marker + title)
+  const pinned = await findPinnedDashboardMessage(channel, wantTitle).catch(() => null);
+  if (pinned) return pinned;
 
-  // 3) Otherwise create new once
-  if (!msg) {
-    msg = await channel.send({ content: fallbackText }).catch(() => null);
-  }
-
-  return msg;
+  // 3) Create new once
+  return await channel.send({ content: fallbackText }).catch(() => null);
 }
 
 async function ensurePinned(channel, msg) {
