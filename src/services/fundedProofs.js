@@ -140,8 +140,7 @@ async function ensureFundedDashboard(client) {
   const ch = await client.channels.fetch(FUNDED_CHANNEL_ID).catch(() => null);
   if (!ch || !ch.isTextBased()) return;
 
-  const totals = await computeFundedTotals().catch(() => null);
-  if (!totals) return;
+  const totals = await computeFundedTotals();
 
   let msg = await findPinnedDashboardMessage(ch);
   if (!msg) {
