@@ -1,6 +1,7 @@
 "use strict";
 
 require("dotenv").config();
+console.log("[BOOT] src/index.js loaded", { ts: new Date().toISOString() });
 
 process.on("unhandledRejection", (err) => console.error("UNHANDLED REJECTION:", err));
 process.on("uncaughtException", (err) => console.error("UNCAUGHT EXCEPTION:", err));
