@@ -160,9 +160,18 @@ async function ensureFundedDashboard(client) {
   }
 
   const totals = await computeFundedTotals().catch((e) => {
-    console.error("[FUNDED_DASHBOARD] abort: computeFundedTotals failed", String(e?.message || e));
-    return null;
-  });
+  console.error("[FUNDED_DASHBOARD] abort: computeFundedTotals failed", e);
+
+  // If pg throws AggregateError, surface inner causes
+  if (e && Array.isArray(e.errors)) {
+    for (const inner of e.errors) {
+      console.error("[FUNDED_DASHBOARD] inner", inner);
+    }
+  }
+
+  return null;
+});
+
   if (!totals) return;
 
   let msg = await findPinnedDashboardMessage(ch).catch((e) => {
