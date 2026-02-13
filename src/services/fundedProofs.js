@@ -1,17 +1,38 @@
 "use strict";
 
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, ModalBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
+const {
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+} = require("discord.js");
 const crypto = require("crypto");
 const { logFunded } = require("./propLedger");
 const { Pool } = require("pg");
 
+// ✅ ADD: hard-require DATABASE_URL so Railway never falls back to localhost
+const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
+if (!DATABASE_URL) {
+  console.error("[FUNDED_DASHBOARD] FATAL: DATABASE_URL is missing in env");
+}
+
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === "production" ? { rejectUnauthorized: false } : false,
+  connectionString: DATABASE_URL,
+  ssl:
+    process.env.NODE_ENV === "production"
+      ? { rejectUnauthorized: false }
+      : false,
 });
 
-const FUNDED_CHANNEL_ID = String(process.env.FUNDED_CERT_CHANNEL_ID || "").trim();
-const REVIEW_QUEUE_ID = String(process.env.PROOF_REVIEW_QUEUE_CHANNEL_ID || "").trim();
+const FUNDED_CHANNEL_ID = String(
+  process.env.FUNDED_CERT_CHANNEL_ID || ""
+).trim();
+const REVIEW_QUEUE_ID = String(
+  process.env.PROOF_REVIEW_QUEUE_CHANNEL_ID || ""
+).trim();
 const LOGO_URL = String(process.env.TGT_LOGO_URL || "").trim();
 
 const DASH_MARKER = "TGT_FUNDED_DASHBOARD";
@@ -45,11 +66,17 @@ async function computeFundedTotals() {
   const yk = yearKeyUTC();
 
   const qSum = async (whereSql, params) => {
-    const { rows } = await pool.query(`SELECT COALESCE(SUM(account_size),0) AS s FROM prop_funded ${whereSql}`, params);
+    const { rows } = await pool.query(
+      `SELECT COALESCE(SUM(account_size),0) AS s FROM prop_funded ${whereSql}`,
+      params
+    );
     return Number(rows?.[0]?.s || 0);
   };
   const qCount = async (whereSql, params) => {
-    const { rows } = await pool.query(`SELECT COUNT(*)::int AS c FROM prop_funded ${whereSql}`, params);
+    const { rows } = await pool.query(
+      `SELECT COUNT(*)::int AS c FROM prop_funded ${whereSql}`,
+      params
+    );
     return Number(rows?.[0]?.c || 0);
   };
 
@@ -61,13 +88,25 @@ async function computeFundedTotals() {
 
   const thisMonth = await qSum("WHERE month_key = $1", [mkThis]);
 
-  return { mkThis, mkPrev, yk, prevMonth, thisMonth, ytd, all, liveCapital, liveAccounts };
+  return {
+    mkThis,
+    mkPrev,
+    yk,
+    prevMonth,
+    thisMonth,
+    ytd,
+    all,
+    liveCapital,
+    liveAccounts,
+  };
 }
 
 function dashboardEmbed(t) {
   const e = new EmbedBuilder()
     .setTitle("💼 Funded Certificates Dashboard")
-    .setDescription("Verified funded accounts submitted by members and approved by staff.")
+    .setDescription(
+      "Verified funded accounts submitted by members and approved by staff."
+    )
     .addFields(
       {
         name: "💼 Funded Capital (Verified)",
@@ -84,7 +123,9 @@ function dashboardEmbed(t) {
           `• **Active Accounts:** **${t.liveAccounts}**`,
       }
     )
-    .setFooter({ text: `The Ghana Trader Desk • Staff-Verified Proof • ${DASH_MARKER}` })
+    .setFooter({
+      text: `The Ghana Trader Desk • Staff-Verified Proof • ${DASH_MARKER}`,
+    })
     .setColor(0xc9a24d)
     .setTimestamp(new Date());
 
@@ -95,7 +136,10 @@ function dashboardEmbed(t) {
 function dashboardComponents() {
   return [
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId("funded_submit").setLabel("➕ Submit Funded Certificate").setStyle(ButtonStyle.Success)
+      new ButtonBuilder()
+        .setCustomId("funded_submit")
+        .setLabel("➕ Submit Funded Certificate")
+        .setStyle(ButtonStyle.Success)
     ),
   ];
 }
@@ -119,8 +163,10 @@ async function findPinnedDashboardMessage(channel) {
     return title === "💼 Funded Certificates Dashboard";
   });
 
-  const pickFrom = (strict.size ? strict : legacy);
-  const keeper = pickFrom.sort((a, b) => b.createdTimestamp - a.createdTimestamp).first() || null;
+  const pickFrom = strict.size ? strict : legacy;
+  const keeper =
+    pickFrom.sort((a, b) => b.createdTimestamp - a.createdTimestamp).first() ||
+    null;
 
   // unpin duplicates of this dashboard
   if (keeper) {
@@ -128,7 +174,9 @@ async function findPinnedDashboardMessage(channel) {
       if (p.id === keeper.id) continue;
       const title = p.embeds?.[0]?.title || "";
       if (title !== "💼 Funded Certificates Dashboard") continue;
-      try { await p.unpin(); } catch {}
+      try {
+        await p.unpin();
+      } catch {}
     }
   }
 
@@ -141,7 +189,13 @@ async function ensureFundedDashboard(client) {
     FUNDED_CERT_CHANNEL_ID: FUNDED_CHANNEL_ID ? "set" : "MISSING",
     PROOF_REVIEW_QUEUE_CHANNEL_ID: REVIEW_QUEUE_ID ? "set" : "MISSING",
     NODE_ENV: process.env.NODE_ENV || null,
+    DATABASE_URL: DATABASE_URL ? "set" : "MISSING",
   });
+
+  if (!DATABASE_URL) {
+    console.error("[FUNDED_DASHBOARD] abort: DATABASE_URL missing");
+    return;
+  }
 
   if (!FUNDED_CHANNEL_ID) {
     console.error("[FUNDED_DASHBOARD] abort: FUNDED_CERT_CHANNEL_ID missing");
@@ -149,7 +203,10 @@ async function ensureFundedDashboard(client) {
   }
 
   const ch = await client.channels.fetch(FUNDED_CHANNEL_ID).catch((e) => {
-    console.error("[FUNDED_DASHBOARD] abort: channel fetch failed", String(e?.message || e));
+    console.error(
+      "[FUNDED_DASHBOARD] abort: channel fetch failed",
+      String(e?.message || e)
+    );
     return null;
   });
 
@@ -160,54 +217,74 @@ async function ensureFundedDashboard(client) {
   }
 
   const totals = await computeFundedTotals().catch((e) => {
-  console.error("[FUNDED_DASHBOARD] abort: computeFundedTotals failed", e);
+    console.error("[FUNDED_DASHBOARD] abort: computeFundedTotals failed", e);
 
-  // If pg throws AggregateError, surface inner causes
-  if (e && Array.isArray(e.errors)) {
-    for (const inner of e.errors) {
-      console.error("[FUNDED_DASHBOARD] inner", inner);
+    // If pg throws AggregateError, surface inner causes
+    if (e && Array.isArray(e.errors)) {
+      for (const inner of e.errors) {
+        console.error("[FUNDED_DASHBOARD] inner", inner);
+      }
     }
-  }
 
-  return null;
-});
+    return null;
+  });
 
   if (!totals) return;
 
   let msg = await findPinnedDashboardMessage(ch).catch((e) => {
-    console.error("[FUNDED_DASHBOARD] findPinnedDashboardMessage failed", String(e?.message || e));
+    console.error(
+      "[FUNDED_DASHBOARD] findPinnedDashboardMessage failed",
+      String(e?.message || e)
+    );
     return null;
   });
 
   if (!msg) {
     msg = await ch
-      .send({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
+      .send({
+        embeds: [dashboardEmbed(totals)],
+        components: dashboardComponents(),
+      })
       .catch((e) => {
-        console.error("[FUNDED_DASHBOARD] send failed", String(e?.message || e));
+        console.error(
+          "[FUNDED_DASHBOARD] send failed",
+          String(e?.message || e)
+        );
         return null;
       });
-    if (!msg) return; // IMPORTANT: prevents msg.edit crash + tells us send failed
+    if (!msg) return; // prevents msg.edit crash
   }
 
   await msg
     .edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
-    .catch((e) => console.error("[FUNDED_DASHBOARD] edit failed", String(e?.message || e)));
+    .catch((e) =>
+      console.error("[FUNDED_DASHBOARD] edit failed", String(e?.message || e))
+    );
 
   const pins = await ch.messages.fetchPinned().catch((e) => {
-    console.error("[FUNDED_DASHBOARD] fetchPinned failed", String(e?.message || e));
+    console.error(
+      "[FUNDED_DASHBOARD] fetchPinned failed",
+      String(e?.message || e)
+    );
     return null;
   });
 
   const isPinned = pins?.some((p) => p.id === msg.id);
   if (!isPinned) {
-    await msg.pin().catch((e) => console.error("[FUNDED_DASHBOARD] pin failed", String(e?.message || e)));
+    await msg
+      .pin()
+      .catch((e) =>
+        console.error("[FUNDED_DASHBOARD] pin failed", String(e?.message || e))
+      );
   }
 
   console.log("[FUNDED_DASHBOARD] done");
 }
 
 function buildFundedSubmitModal() {
-  const m = new ModalBuilder().setCustomId("funded_modal").setTitle("Submit Funded Certificate");
+  const m = new ModalBuilder()
+    .setCustomId("funded_modal")
+    .setTitle("Submit Funded Certificate");
 
   const firm = new TextInputBuilder()
     .setCustomId("firm")
@@ -244,7 +321,7 @@ function buildFundedSubmitModal() {
     new ActionRowBuilder().addComponents(amount),
     new ActionRowBuilder().addComponents(status),
     new ActionRowBuilder().addComponents(fundedDate),
-    new ActionRowBuilder().addComponents(proof),
+    new ActionRowBuilder().addComponents(proof)
   );
 
   return m;
@@ -257,7 +334,11 @@ function reviewEmbed(payload, submissionId, userId) {
     .addFields(
       { name: "Member", value: `<@${userId}>`, inline: true },
       { name: "Firm", value: payload.firm, inline: true },
-      { name: "Funded Amount", value: fmtMoneyUSD(payload.accountSize), inline: true },
+      {
+        name: "Funded Amount",
+        value: fmtMoneyUSD(payload.accountSize),
+        inline: true,
+      },
       { name: "Status", value: String(payload.status).toUpperCase(), inline: true },
       { name: "Funded Date", value: payload.fundedDate || "—", inline: true },
       { name: "Proof", value: payload.proofLink, inline: false }
@@ -272,8 +353,14 @@ function reviewEmbed(payload, submissionId, userId) {
 function reviewButtons(submissionId) {
   return [
     new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(`funded_approve:${submissionId}`).setLabel("✅ Approve").setStyle(ButtonStyle.Success),
-      new ButtonBuilder().setCustomId(`funded_reject:${submissionId}`).setLabel("❌ Reject").setStyle(ButtonStyle.Danger),
+      new ButtonBuilder()
+        .setCustomId(`funded_approve:${submissionId}`)
+        .setLabel("✅ Approve")
+        .setStyle(ButtonStyle.Success),
+      new ButtonBuilder()
+        .setCustomId(`funded_reject:${submissionId}`)
+        .setLabel("❌ Reject")
+        .setStyle(ButtonStyle.Danger)
     ),
   ];
 }
@@ -281,7 +368,11 @@ function reviewButtons(submissionId) {
 function verifiedPublicEmbed(payload, userId, totalsAfter) {
   const e = new EmbedBuilder()
     .setTitle("✅ Verified Funded Account")
-    .setDescription(`Congratulations <@${userId}> — **${fmtMoneyUSD(payload.accountSize)} funded** with **${payload.firm}**.`)
+    .setDescription(
+      `Congratulations <@${userId}> — **${fmtMoneyUSD(
+        payload.accountSize
+      )} funded** with **${payload.firm}**.`
+    )
     .addFields(
       { name: "Status", value: String(payload.status).toUpperCase(), inline: true },
       { name: "Funded Date", value: payload.fundedDate || "—", inline: true },
@@ -305,7 +396,9 @@ function verifiedPublicEmbed(payload, userId, totalsAfter) {
 }
 
 function buildRejectReasonModal(submissionId) {
-  const m = new ModalBuilder().setCustomId(`funded_reject_modal:${submissionId}`).setTitle("Reject Submission");
+  const m = new ModalBuilder()
+    .setCustomId(`funded_reject_modal:${submissionId}`)
+    .setTitle("Reject Submission");
 
   const reason = new TextInputBuilder()
     .setCustomId("reason")
@@ -363,10 +456,14 @@ async function handleFundedInteractions(client, interaction) {
     const proofLink = interaction.fields.getTextInputValue("proofLink")?.trim();
 
     const accountSize = Number(accountSizeRaw);
-    const status = (statusRaw === "live" || statusRaw === "lost") ? statusRaw : null;
+    const status = statusRaw === "live" || statusRaw === "lost" ? statusRaw : null;
 
     if (!firm || !Number.isFinite(accountSize) || accountSize <= 0 || !status || !proofLink) {
-      await interaction.reply({ content: "❌ Invalid submission. Please ensure firm, amount (number), status (live/lost) and proof link are correct.", ephemeral: true });
+      await interaction.reply({
+        content:
+          "❌ Invalid submission. Please ensure firm, amount (number), status (live/lost) and proof link are correct.",
+        ephemeral: true,
+      });
       return true;
     }
 
@@ -375,12 +472,22 @@ async function handleFundedInteractions(client, interaction) {
 
     const q = await client.channels.fetch(REVIEW_QUEUE_ID).catch(() => null);
     if (q && q.isTextBased()) {
-      await q.send({ embeds: [reviewEmbed(payload, submissionId, interaction.user.id)], components: reviewButtons(submissionId) }).catch(() => null);
+      await q
+        .send({
+          embeds: [reviewEmbed(payload, submissionId, interaction.user.id)],
+          components: reviewButtons(submissionId),
+        })
+        .catch(() => null);
     }
 
     // Acknowledge member
-    await interaction.reply({ content: "✅ Submitted for staff review. You’ll be notified after approval or rejection.", ephemeral: true });
-    await interaction.user.send(`✅ Your funded submission was received and is pending staff review.\nSubmission ID: ${submissionId}`).catch(() => null);
+    await interaction.reply({
+      content: "✅ Submitted for staff review. You’ll be notified after approval or rejection.",
+      ephemeral: true,
+    });
+    await interaction.user
+      .send(`✅ Your funded submission was received and is pending staff review.\nSubmission ID: ${submissionId}`)
+      .catch(() => null);
 
     return true;
   }
@@ -391,7 +498,10 @@ async function handleFundedInteractions(client, interaction) {
     const sub = await getSubmission(submissionId).catch(() => null);
 
     if (!sub || sub.status !== "pending") {
-      await interaction.reply({ content: "❌ This submission is not pending (already handled or missing).", ephemeral: true });
+      await interaction.reply({
+        content: "❌ This submission is not pending (already handled or missing).",
+        ephemeral: true,
+      });
       return true;
     }
 
@@ -419,7 +529,9 @@ async function handleFundedInteractions(client, interaction) {
     // DM member approved
     const user = await client.users.fetch(sub.user_id).catch(() => null);
     if (user) {
-      await user.send(`✅ Approved! Your funded certificate has been verified and posted publicly in #funded-certificates.`).catch(() => null);
+      await user.send(
+        `✅ Approved! Your funded certificate has been verified and posted publicly in #funded-certificates.`
+      ).catch(() => null);
     }
 
     // Acknowledge staff action + disable buttons
@@ -441,7 +553,10 @@ async function handleFundedInteractions(client, interaction) {
 
     const sub = await getSubmission(submissionId).catch(() => null);
     if (!sub || sub.status !== "pending") {
-      await interaction.reply({ content: "❌ This submission is not pending (already handled or missing).", ephemeral: true });
+      await interaction.reply({
+        content: "❌ This submission is not pending (already handled or missing).",
+        ephemeral: true,
+      });
       return true;
     }
 
@@ -449,9 +564,11 @@ async function handleFundedInteractions(client, interaction) {
 
     const user = await client.users.fetch(sub.user_id).catch(() => null);
     if (user) {
-      await user.send(
-        `❌ Your funded submission was rejected.\n\nReason:\n${reason}\n\nFix the issue and resubmit using the Submit button in #funded-certificates.`
-      ).catch(() => null);
+      await user
+        .send(
+          `❌ Your funded submission was rejected.\n\nReason:\n${reason}\n\nFix the issue and resubmit using the Submit button in #funded-certificates.`
+        )
+        .catch(() => null);
     }
 
     await interaction.reply({ content: "❌ Rejected. The member has been notified by DM.", ephemeral: true });
