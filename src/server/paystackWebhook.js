@@ -723,6 +723,8 @@ if (referrerId && user?.id && referrerId !== String(user.id)) {
       if (eventType === "charge.success") {
         const paid = data || {};
         const meta = paid?.metadata || {};
+        const ref =
+          String(event?.data?.reference || event?.data?.id || "").trim() || "—";
 
         let tier = String(meta?.tier || "").toUpperCase();
         let discordUserId = String(meta?.discordUserId || "").trim();
