@@ -136,6 +136,7 @@ async function findPinnedDashboardMessage(channel) {
 }
 
 async function ensureFundedDashboard(client) {
+  console.log("FUNDED_DASHBOARD_INIT_START");
   if (!FUNDED_CHANNEL_ID) return;
   const ch = await client.channels.fetch(FUNDED_CHANNEL_ID).catch(() => null);
   if (!ch || !ch.isTextBased()) return;
@@ -144,10 +145,8 @@ async function ensureFundedDashboard(client) {
 
   let msg = await findPinnedDashboardMessage(ch);
   if (!msg) {
-    msg = await ch.send({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() }).catch(() => null);
-    if (msg) await msg.pin().catch(() => null);
-    return;
-  }
+  msg = await ch.send({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() }).catch(() => null);
+}
 
   await msg.edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() }).catch(() => null);
   // ensure pinned
