@@ -9,6 +9,7 @@ const { setDiscordClient } = require("./discordRoles");
 const { startPaystackWebhookServer } = require("./server/paystackWebhook");
 const { startSubscriptionMonitor } = require("./jobs/subscriptionMonitor");
 const referrals = require("./services/referrals");
+const { ensureFundedDashboard, handleFundedInteractions } = require("./services/fundedProofs");
 
 const fs = require("fs");
 const path = require("path");
@@ -161,6 +162,7 @@ client.once(Events.ClientReady, async (c) => {
 }
 
   setDiscordClient(client);
+  ensureFundedDashboard(client).catch(() => null);
   console.log(`✅ Logged in as ${c.user.tag}`);
 
   // ✅ Start hardened scheduler (keep)
@@ -251,6 +253,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ✅ BUTTONS
     // =========================
     if (interaction.isButton()) {
+      const handled = await handleFundedInteractions(client, interaction).catch(() => false);
+      if (handled) return;
+
       const id = interaction.customId;
 
       // ---- Contract Gate buttons ----
