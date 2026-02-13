@@ -723,8 +723,6 @@ if (referrerId && user?.id && referrerId !== String(user.id)) {
       if (eventType === "charge.success") {
         const paid = data || {};
         const meta = paid?.metadata || {};
-        const ref =
-          String(event?.data?.reference || event?.data?.id || "").trim() || "—";
 
         let tier = String(meta?.tier || "").toUpperCase();
         let discordUserId = String(meta?.discordUserId || "").trim();
@@ -734,7 +732,12 @@ if (referrerId && user?.id && referrerId !== String(user.id)) {
           customer: paid?.customer?.customer_code,
           subscription: paid?.subscription?.subscription_code,
         });
-        const reference = String(paid?.reference || "").trim();
+        const reference = String(
+          paid?.reference ||
+          event?.data?.reference ||
+          event?.data?.id ||
+          "-"
+        ).trim();
 
         if (!tier || !discordUserId) {
   // Fallback for subscription renewals where metadata may be missing:
@@ -799,7 +802,7 @@ if (referrerId && user?.id && referrerId !== String(user.id)) {
         try {
           const rolesMod = require("../discordRoles");
           if (rolesMod?.revokePremiumRoles) await rolesMod.revokePremiumRoles(discordUserId);
-          if (rolesMod?.grantRole) await rolesMod.grantRole(discordUserId, tier);
+          if (rolesMod?.grantRole) await rolesMod.grantRole(discordUserId, tier, reference);
           console.log(`✅ ROLE UPDATED: ${tier} -> ${discordUserId}`);
           // 1.5) Prestige DM: receipt + Contract Gate button
 
