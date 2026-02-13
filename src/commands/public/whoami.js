@@ -15,6 +15,17 @@ function formatDate(iso) {
 
 // Detect tier by checking the member's roles against TIERS[*].roleId
 function getTierKeyFromMember(member, TIERS) {
+  const envMap = {
+  diamond: process.env.ROLE_DIAMOND_ID,
+  gold: process.env.ROLE_GOLD_ID,
+  silver: process.env.ROLE_SILVER_ID,
+};
+
+for (const k of Object.keys(envMap)) {
+  const rid = String(envMap[k] || "").trim();
+  if (rid && member.roles.cache.has(rid)) return k;
+}
+
   if (!member || !member.roles || !member.roles.cache || !TIERS) return null;
 
   for (const key of Object.keys(TIERS)) {
