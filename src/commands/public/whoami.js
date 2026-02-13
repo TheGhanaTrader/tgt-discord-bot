@@ -118,7 +118,7 @@ module.exports = {
     return interaction.reply({
       content:
         `👤 **Membership Status**\n` +
-        `• Tier: **${TIERS[tierKey].name}** ${TIERS[tierKey].emoji}\n` +
+        `• Tier: **${String(tierKey).toUpperCase()}**\n` +
         `• Expires: **${expiryText}**`,
       components: [row],
       flags: MessageFlags.Ephemeral,
