@@ -162,7 +162,7 @@ client.once(Events.ClientReady, async (c) => {
 }
 
   setDiscordClient(client);
-  ensureFundedDashboard(client).catch(() => null);
+  await ensureFundedDashboard(client).catch((e) => console.error("FUNDED_DASHBOARD_BOOT_ERR", e));
   console.log(`✅ Logged in as ${c.user.tag}`);
 
   // ✅ Start hardened scheduler (keep)

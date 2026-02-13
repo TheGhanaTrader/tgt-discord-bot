@@ -136,23 +136,65 @@ async function findPinnedDashboardMessage(channel) {
 }
 
 async function ensureFundedDashboard(client) {
-  console.log("FUNDED_DASHBOARD_INIT_START");
-  if (!FUNDED_CHANNEL_ID) return;
-  const ch = await client.channels.fetch(FUNDED_CHANNEL_ID).catch(() => null);
-  if (!ch || !ch.isTextBased()) return;
+  console.log("[FUNDED_DASHBOARD] start", {
+    ts: new Date().toISOString(),
+    FUNDED_CERT_CHANNEL_ID: FUNDED_CHANNEL_ID ? "set" : "MISSING",
+    PROOF_REVIEW_QUEUE_CHANNEL_ID: REVIEW_QUEUE_ID ? "set" : "MISSING",
+    NODE_ENV: process.env.NODE_ENV || null,
+  });
 
-  const totals = await computeFundedTotals();
+  if (!FUNDED_CHANNEL_ID) {
+    console.error("[FUNDED_DASHBOARD] abort: FUNDED_CERT_CHANNEL_ID missing");
+    return;
+  }
 
-  let msg = await findPinnedDashboardMessage(ch);
+  const ch = await client.channels.fetch(FUNDED_CHANNEL_ID).catch((e) => {
+    console.error("[FUNDED_DASHBOARD] abort: channel fetch failed", String(e?.message || e));
+    return null;
+  });
+
+  if (!ch) return;
+  if (!ch.isTextBased()) {
+    console.error("[FUNDED_DASHBOARD] abort: channel is not text-based");
+    return;
+  }
+
+  const totals = await computeFundedTotals().catch((e) => {
+    console.error("[FUNDED_DASHBOARD] abort: computeFundedTotals failed", String(e?.message || e));
+    return null;
+  });
+  if (!totals) return;
+
+  let msg = await findPinnedDashboardMessage(ch).catch((e) => {
+    console.error("[FUNDED_DASHBOARD] findPinnedDashboardMessage failed", String(e?.message || e));
+    return null;
+  });
+
   if (!msg) {
-  msg = await ch.send({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() }).catch(() => null);
-}
+    msg = await ch
+      .send({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
+      .catch((e) => {
+        console.error("[FUNDED_DASHBOARD] send failed", String(e?.message || e));
+        return null;
+      });
+    if (!msg) return; // IMPORTANT: prevents msg.edit crash + tells us send failed
+  }
 
-  await msg.edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() }).catch(() => null);
-  // ensure pinned
-  const pins = await ch.messages.fetchPinned().catch(() => null);
+  await msg
+    .edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
+    .catch((e) => console.error("[FUNDED_DASHBOARD] edit failed", String(e?.message || e)));
+
+  const pins = await ch.messages.fetchPinned().catch((e) => {
+    console.error("[FUNDED_DASHBOARD] fetchPinned failed", String(e?.message || e));
+    return null;
+  });
+
   const isPinned = pins?.some((p) => p.id === msg.id);
-  if (!isPinned) await msg.pin().catch(() => null);
+  if (!isPinned) {
+    await msg.pin().catch((e) => console.error("[FUNDED_DASHBOARD] pin failed", String(e?.message || e)));
+  }
+
+  console.log("[FUNDED_DASHBOARD] done");
 }
 
 function buildFundedSubmitModal() {
