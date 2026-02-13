@@ -247,6 +247,9 @@ client.on("guildMemberAdd", async (member) => {
 // ===== INTERACTIONS =====
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
+    // 🔹 FUNDED CERTIFICATES — MUST BE FIRST
+    if (await handleFundedInteractions(client, interaction)) return;
+
     // Inject TGT context for BOTH buttons and slash commands
     attachTgtContext(interaction);
 
@@ -254,9 +257,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // ✅ BUTTONS
     // =========================
     if (interaction.isButton()) {
-      const handled = await handleFundedInteractions(client, interaction).catch(() => false);
-      if (handled) return;
-
       const id = interaction.customId;
 
       // ---- Contract Gate buttons ----
