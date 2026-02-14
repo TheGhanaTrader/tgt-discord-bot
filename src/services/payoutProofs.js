@@ -190,7 +190,7 @@ async function ensurePayoutDashboard(client) {
   });
   if (!totals) return;
 
-  const msg = await findPinnedDashboardMessage(ch, client).catch(() => null);
+  let msg = await findPinnedDashboardMessage(ch, client).catch(() => null);
   if (!msg) {
   console.warn("[PAYOUT_DASHBOARD] No pinned dashboard found — creating one-time pinned dashboard.");
 
