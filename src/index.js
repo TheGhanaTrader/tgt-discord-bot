@@ -395,9 +395,9 @@ return interaction.reply({
     console.error("Interaction error:", err);
     try {
       if (interaction.replied || interaction.deferred) {
-        await interaction.followUp({ content: "❌ Command failed.", ephemeral: true });
+        await interaction.followUp({ content: "❌ Command failed.", flags: 64 });
       } else {
-        await interaction.reply({ content: "❌ Command failed.", ephemeral: true });
+        await interaction.reply({ content: "❌ Command failed.", flags: 64 });
       }
     } catch (_) {}
   }
