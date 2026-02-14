@@ -237,16 +237,16 @@ async function ensureFundedDashboard(client) {
   let msg = await findPinnedDashboardMessage(ch).catch(() => null);
 
 if (!msg) {
-  // Create ONCE + pin ONCE
-  msg = await ch.send({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() }).catch(() => null);
-  if (!msg) return;
-  await msg.pin().catch(() => null);
-} else {
-  // Edit ONLY (never repost)
-  await msg.edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() }).catch(() => null);
+  console.warn("[FUNDED_DASHBOARD] No pinned dashboard found — edit-only mode (no repost).");
+  return;
 }
 
-  console.log("[FUNDED_DASHBOARD] done");
+// EDIT ONLY — NEVER POST AGAIN
+await msg
+  .edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
+  .catch((e) => console.error("[FUNDED_DASHBOARD] edit failed", String(e?.message || e)));
+
+console.log("[FUNDED_DASHBOARD] done");
 }
 
 function buildFundedSubmitModal() {
