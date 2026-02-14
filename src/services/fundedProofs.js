@@ -182,7 +182,10 @@ if (!msg) {
   console.warn("[FUNDED_DASHBOARD] No pinned dashboard found — creating one-time pinned dashboard.");
 
   msg = await ch
-    .send({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
+    .send({
+      embeds: [dashboardEmbed(totals)],
+      components: dashboardComponents(),
+    })
     .catch((e) => {
       console.error("[FUNDED_DASHBOARD] send failed", String(e?.message || e));
       return null;
@@ -195,16 +198,21 @@ if (!msg) {
   });
 
   console.log("[FUNDED_DASHBOARD] created and pinned");
-  return; // IMPORTANT: stop here (don’t fall through)
-}
+  return; // 🔴 IMPORTANT: STOP HERE
 }
 
-// EDIT ONLY — NEVER POST AGAIN
+// EDIT ONLY — NEVER CREATE AGAIN
 await msg
-  .edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
-  .catch((e) => console.error("[FUNDED_DASHBOARD] edit failed", String(e?.message || e)));
+  .edit({
+    embeds: [dashboardEmbed(totals)],
+    components: dashboardComponents(),
+  })
+  .catch((e) =>
+    console.error("[FUNDED_DASHBOARD] edit failed", String(e?.message || e))
+  );
 
 console.log("[FUNDED_DASHBOARD] done");
+}
 
 // ---------------- Embeds / UI ----------------
 function buildFundedSubmitModal() {
