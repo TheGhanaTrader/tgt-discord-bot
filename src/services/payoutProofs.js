@@ -203,9 +203,9 @@ async function ensurePayoutDashboard(client) {
 
   if (!msg) return;
 
-  await msg.pin().catch((e) => {
-    console.error("[PAYOUT_DASHBOARD] pin failed", String(e?.message || e));
-  });
+  await msg.pin().catch((e) =>
+  console.error("[PAYOUT_DASHBOARD] pin failed", String(e?.message || e))
+);
 
   console.log("[PAYOUT_DASHBOARD] created and pinned");
   return; // IMPORTANT: stop here (don’t fall through)
