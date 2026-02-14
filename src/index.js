@@ -11,6 +11,7 @@ const { startPaystackWebhookServer } = require("./server/paystackWebhook");
 const { startSubscriptionMonitor } = require("./jobs/subscriptionMonitor");
 const referrals = require("./services/referrals");
 const { ensureFundedDashboard, handleFundedInteractions } = require("./services/fundedProofs");
+const { ensurePayoutDashboard, handlePayoutInteractions } = require("./services/payoutProofs");
 
 const fs = require("fs");
 const path = require("path");
@@ -164,6 +165,8 @@ client.once(Events.ClientReady, async (c) => {
 
   setDiscordClient(client);
   await ensureFundedDashboard(client).catch((e) => console.error("FUNDED_DASHBOARD_BOOT_ERR", e));
+  await ensurePayoutDashboard(client).catch((e) => console.error("PAYOUT_DASHBOARD_BOOT_ERR", e));
+
   console.log(`✅ Logged in as ${c.user.tag}`);
 
   // ✅ Start hardened scheduler (keep)
@@ -249,6 +252,8 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // 🔹 FUNDED CERTIFICATES — MUST BE FIRST
     if (await handleFundedInteractions(client, interaction)) return;
+    if (await handleFundedInteractions(client, interaction)) return;
+    if (await handlePayoutInteractions(client, interaction)) return;
 
     // Inject TGT context for BOTH buttons and slash commands
     attachTgtContext(interaction);
