@@ -145,23 +145,26 @@ function dashboardComponents() {
 }
 
 async function findPinnedDashboardMessage(channel) {
-  const pins = await channel.messages.fetchPins().catch(() => null);
-  if (!pins) return null;
+  // STEP 1: Look ONLY at pinned messages
+const pinned = await channel.messages.fetchPinned();
 
-  // Prefer marker, fallback title-only
-  const strict = pins.filter((m) => {
-    if (!m.author?.bot) return false;
-    const title = m.embeds?.[0]?.title || "";
-    if (title !== "💼 Funded Certificates Dashboard") return false;
-    const footer = m.embeds?.[0]?.footer?.text || "";
-    return footer.includes(DASH_MARKER);
-  });
+// STEP 2: Find existing dashboard by marker
+const existing = pinned.find(
+  m => m.author.id === client.user.id &&
+       m.embeds?.[0]?.footer?.text?.includes("TGT_FUNDED_DASHBOARD")
+);
 
-  const legacy = pins.filter((m) => {
-    if (!m.author?.bot) return false;
-    const title = m.embeds?.[0]?.title || "";
-    return title === "💼 Funded Certificates Dashboard";
-  });
+// STEP 3: If exists → EDIT ONLY
+if (existing) {
+  await existing.edit({ embeds: [embed], components: [row] });
+  console.log("[FUNDED_DASHBOARD] updated existing dashboard");
+  return;
+}
+
+// STEP 4: If not exists → POST ONCE
+const msg = await channel.send({ embeds: [embed], components: [row] });
+await msg.pin();
+console.log("[FUNDED_DASHBOARD] created and pinned dashboard");
 
   const pickFrom = strict.size ? strict : legacy;
   const keeper =
