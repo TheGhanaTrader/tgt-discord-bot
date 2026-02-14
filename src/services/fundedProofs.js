@@ -613,11 +613,10 @@ async function handleFundedInteractions(client, interaction) {
   }
 
   // 5) Reject -> open reject reason modal
-  if (interaction.isButton() && interaction.customId.startsWith("funded_reject:")) {
-    const submissionId = interaction.customId.split(":")[1];
-    await interaction.showModal(buildRejectReasonModal(submissionId));
-    return true;
-  }
+  if (interaction.isButton() && interaction.customId === "funded_submit") {
+  await interaction.showModal(buildFundedSubmitModal());
+  return true;
+}
 
   // 6) Reject modal submit
   if (interaction.isModalSubmit() && interaction.customId.startsWith("funded_reject_modal:")) {
