@@ -251,10 +251,8 @@ await msg
 console.log("[FUNDED_DASHBOARD] done");
 }
 
-function buildFundedSubmitModal() {
-  const m = new ModalBuilder()
-    .setCustomId("funded_modal")
-    .setTitle("Submit Funded Certificate");
+function buildFundedSubmitModal(submissionId) {
+  const m = new ModalBuilder().setCustomId(`funded_modal:${submissionId}`).setTitle("Submit Funded Certificate");
 
   const firm = new TextInputBuilder()
     .setCustomId("firm")
@@ -440,36 +438,140 @@ async function resolveProofImageUrl(client, proofLink) {
   return url;
 }
 
+function uploadContinueButtons(submissionId) {
+  return [
+    new ActionRowBuilder().addComponents(
+      new ButtonBuilder()
+        .setCustomId(`funded_continue:${submissionId}`)
+        .setLabel("Continue")
+        .setStyle(ButtonStyle.Primary)
+    ),
+  ];
+}
+
 // ---------------- Interaction handler ----------------
 async function handleFundedInteractions(client, interaction) {
   // Button: open modal
   if (interaction.isButton() && interaction.customId === "funded_submit") {
-    await interaction.showModal(buildFundedSubmitModal());
+  // 1) Create submission row first (stage: upload)
+  const submissionId = crypto.randomUUID();
+
+  await pool.query(
+    "INSERT INTO proof_submissions (id, type, user_id, status, payload) VALUES ($1,$2,$3,'pending',$4::jsonb)",
+    [submissionId, "funded", interaction.user.id, JSON.stringify({ stage: "upload", threadId: null, proofImageUrl: null })]
+  );
+
+  // 2) Create a private thread for upload (inside the same channel)
+  const parent = interaction.channel;
+  if (!parent || !parent.isTextBased()) {
+    await interaction.reply({ content: "❌ Please use this inside the server channel.", ephemeral: true });
     return true;
   }
 
+  // Create a tiny starter message then thread from it
+  const starter = await parent.send({
+    content: `📁 Funded proof upload thread for <@${interaction.user.id}> (Submission: \`${submissionId}\`)`,
+  });
+
+  const thread = await starter.startThread({
+    name: `funded-proof-${interaction.user.username}`.slice(0, 90),
+    autoArchiveDuration: 1440, // 24h
+    type: 12, // GUILD_PRIVATE_THREAD
+    reason: "Funded proof upload",
+  });
+
+  // Add the member so they can see it
+  await thread.members.add(interaction.user.id).catch(() => null);
+
+  // Save thread id in payload
+  await updatePayload(submissionId, { stage: "upload", threadId: thread.id, proofImageUrl: null });
+
+  // 3) Instructions inside thread
+  await thread.send({
+    content:
+      "✅ **Upload your funded certificate image here** (attach the image).\n\nThen click **Continue**.",
+    components: uploadContinueButtons(submissionId),
+  });
+
+  // 4) Ephemeral reply with thread link
+  await interaction.reply({
+    content: `✅ Private upload thread created: <#${thread.id}>\nUpload the certificate image there, then click **Continue**.`,
+    ephemeral: true,
+  });
+
+  return true;
+}
+
+if (interaction.isButton() && interaction.customId.startsWith("funded_continue:")) {
+  const submissionId = interaction.customId.split(":")[1];
+
+  const sub = await getSubmission(submissionId).catch(() => null);
+  if (!sub) {
+    await interaction.reply({ content: "❌ Submission not found.", ephemeral: true });
+    return true;
+  }
+  if (sub.user_id !== interaction.user.id) {
+    await interaction.reply({ content: "❌ Only the submitter can continue this submission.", ephemeral: true });
+    return true;
+  }
+
+  // Find latest image attachment in this thread by the user
+  const ch = interaction.channel;
+  if (!ch || !ch.isTextBased()) {
+    await interaction.reply({ content: "❌ Use Continue inside the upload thread.", ephemeral: true });
+    return true;
+  }
+
+  const msgs = await ch.messages.fetch({ limit: 50 }).catch(() => null);
+  const latestWithImage = msgs
+    ? msgs
+        .filter((m) => m.author?.id === interaction.user.id && m.attachments?.size)
+        .sort((a, b) => b.createdTimestamp - a.createdTimestamp)
+        .first()
+    : null;
+
+  const att = latestWithImage?.attachments?.first?.() || null;
+  const url = att?.url || null;
+
+  if (!url) {
+    await interaction.reply({ content: "❌ Please upload the certificate image (as an attachment) first, then press Continue.", ephemeral: true });
+    return true;
+  }
+
+  // Save proofImageUrl and advance stage
+  const payload = sub.payload || {};
+  payload.stage = "form";
+  payload.proofImageUrl = url;
+
+  await updatePayload(submissionId, payload);
+
+  // Open modal (now includes submission id)
+  await interaction.showModal(buildFundedSubmitModal(submissionId));
+  return true;
+}
+
   // Modal submit: create pending + post to review queue + DM user
-  if (interaction.isModalSubmit() && interaction.customId === "funded_modal") {
-    const firm = interaction.fields.getTextInputValue("firm")?.trim();
-    const accountSizeRaw = interaction.fields.getTextInputValue("accountSize")?.trim();
-    const statusRaw = interaction.fields.getTextInputValue("status")?.trim().toLowerCase();
-    const fundedDate = interaction.fields.getTextInputValue("fundedDate")?.trim();
-    const proofLink = interaction.fields.getTextInputValue("proofLink")?.trim();
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("funded_modal:")) {
+  const submissionId = interaction.customId.split(":")[1];
 
-    const accountSize = Number(accountSizeRaw);
-    const status = statusRaw === "live" || statusRaw === "lost" ? statusRaw : null;
+  const sub = await getSubmission(submissionId).catch(() => null);
+  if (!sub || sub.user_id !== interaction.user.id) {
+    await interaction.reply({ content: "❌ Submission not found or not yours.", ephemeral: true });
+    return true;
+  }
+  
+  const existing = sub.payload || {};
+  const proofImageUrl = existing.proofImageUrl || null;
 
-    if (!firm || !Number.isFinite(accountSize) || accountSize <= 0 || !status || !proofLink) {
-      await interaction.reply({
-        content:
-          "❌ Invalid submission. Please ensure firm, amount (number), status (live/lost) and proof link are correct.",
-        ephemeral: true,
-      });
-      return true;
-    }
+  const payload = {
+    firm,
+    accountSize,
+    status,
+    fundedDate: fundedDate || null,
+    proofLink: proofImageUrl, // comes from uploaded attachment in thread
+  };
 
-    const payload = { firm, accountSize, status, fundedDate: fundedDate || null, proofLink };
-    const submissionId = await createSubmission("funded", interaction.user.id, payload);
+  await updatePayload(submissionId, payload);
 
     const q = await client.channels.fetch(REVIEW_QUEUE_ID).catch(() => null);
     if (q && q.isTextBased()) {
@@ -588,6 +690,12 @@ for (const channelId of targets) {
     }
 
     await markRejected(submissionId, interaction.user.id, reason).catch(() => null);
+    async function updatePayload(id, payload) {
+  await pool.query(
+    "UPDATE proof_submissions SET payload = $2::jsonb WHERE id = $1",
+    [id, JSON.stringify(payload)]
+  );
+}
 
     const user = await client.users.fetch(sub.user_id).catch(() => null);
     if (user) {
