@@ -315,15 +315,15 @@ async function insertSubmission(id, userId, payload) {
     [id, "funded", userId, JSON.stringify(payload)]
   );
 }
-async function updatePayload(id, payload) {
-  await pool.query("UPDATE proof_submissions SET payload = $2::jsonb WHERE id = $1", [
-    id,
-    JSON.stringify(payload),
-  ]);
-}
 async function getSubmission(id) {
   const { rows } = await pool.query("SELECT * FROM proof_submissions WHERE id = $1", [id]);
   return rows?.[0] || null;
+}
+async function updatePayload(id, payload) {
+  await pool.query(
+    "UPDATE proof_submissions SET payload = $2::jsonb WHERE id = $1",
+    [id, JSON.stringify(payload)]
+  );
 }
 async function markApproved(id, reviewerId) {
   await pool.query(
@@ -363,6 +363,19 @@ async function deleteThreadById(client, threadId) {
 
 // ---------------- Interaction handler ----------------
 async function handleFundedInteractions(client, interaction) {
+    async function cleanupSubmissionThread(sub) {
+    const payload = sub?.payload || {};
+    const threadId = payload.threadId;
+    if (!threadId) return;
+
+    const th = await client.channels.fetch(threadId).catch(() => null);
+    if (!th) return;
+
+    await th.setLocked(true).catch(() => null);
+    await th.setArchived(true).catch(() => null);
+    await th.delete("Funded proof handled (approved/rejected)").catch(() => null);
+  }
+
   // 1) Dashboard button -> open modal
   if (interaction.isButton() && interaction.customId === "funded_submit") {
     await interaction.showModal(buildFundedSubmitModal());
@@ -438,6 +451,14 @@ async function handleFundedInteractions(client, interaction) {
       })
       .catch(() => null);
 
+    const openRow = new ActionRowBuilder().addComponents(
+  new ButtonBuilder()
+    .setStyle(ButtonStyle.Link)
+    .setLabel("📂 Upload Certificate (Open Thread)")
+    .setURL(`https://discord.com/channels/${interaction.guildId}/${thread.id}`)
+);
+
+    // ✅ keep dashboard clean: remove the starter message (thread remains)
     if (!thread) {
       await interaction.reply({
         content: "❌ Could not create the private proof thread. Try again.",
@@ -445,6 +466,8 @@ async function handleFundedInteractions(client, interaction) {
       });
       return true;
     }
+
+    await starter.delete().catch(() => null);
 
     await thread.members.add(interaction.user.id).catch(() => null);
 
@@ -604,6 +627,8 @@ async function handleFundedInteractions(client, interaction) {
     }
 
     // Disable review buttons on staff message
+    await cleanupSubmissionThread(sub);
+
     await interaction.update({ content: "✅ Approved and posted publicly.", components: [] }).catch(() => null);
 
     // Delete proof thread AFTER posting (so image is preserved in Verified/General)
@@ -638,6 +663,8 @@ async function handleFundedInteractions(client, interaction) {
         .send(`❌ Your funded submission was rejected.\n\nReason:\n${reason}\n\nFix the issue and resubmit.`)
         .catch(() => null);
     }
+
+    await cleanupSubmissionThread(sub);
 
     await interaction.reply({ content: "❌ Rejected. The member has been notified by DM.", ephemeral: true });
 
