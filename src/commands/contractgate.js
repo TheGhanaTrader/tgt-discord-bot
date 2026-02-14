@@ -46,8 +46,46 @@ module.exports = {
         .setStyle(ButtonStyle.Success)
     );
 
-    await interaction.channel.send({ embeds: [embed], components: [row] });
+        const CONTRACT_MARKER = "TGT_CONTRACT_GATE";
 
-    return interaction.reply({ content: "✅ Contract gate posted. Pin it in #contract-gate.", ephemeral: true });
-  },
+    // find existing pinned contract gate (bot only)
+    const pins = await interaction.channel.messages.fetchPinned().catch(() => null);
+    let msg = null;
+
+    if (pins) {
+      msg = pins.find((m) => {
+        if (!m.author?.bot) return false;
+        const title = m.embeds?.[0]?.title || "";
+        if (title !== "📜 Contract Gate — Mandatory Acceptance") return false;
+        const footer = m.embeds?.[0]?.footer?.text || "";
+        return footer.includes(CONTRACT_MARKER);
+      }) || null;
+    }
+
+    // ensure marker exists in embed footer (so we can reliably find it later)
+    embed.setFooter({ text: `The Ghana Trader Desk • ${CONTRACT_MARKER}` });
+
+    // create if missing
+    if (!msg) {
+      msg = await interaction.channel.send({ embeds: [embed], components: [row] });
+      await msg.pin().catch(() => null);
+      return interaction.reply({ content: "✅ Contract gate created + pinned.", ephemeral: true });
+    }
+
+    // edit if exists
+    await msg.edit({ embeds: [embed], components: [row] }).catch(() => null);
+
+    // unpin any duplicate pinned contract gate messages (same title)
+    if (pins) {
+      for (const p of pins.values()) {
+        if (p.id === msg.id) continue;
+        const t = p.embeds?.[0]?.title || "";
+        if (t === "📜 Contract Gate — Mandatory Acceptance") {
+          try { await p.unpin(); } catch {}
+        }
+      }
+    }
+
+    return interaction.reply({ content: "✅ Contract gate updated (pinned message).", ephemeral: true });
+  }
 };
