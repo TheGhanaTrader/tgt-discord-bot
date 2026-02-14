@@ -315,7 +315,7 @@ function buildFundedSubmitModal() {
 
   const proof = new TextInputBuilder()
     .setCustomId("proofLink")
-    .setLabel("Proof Link (Discord attachment/message link or image URL)")
+    .setLabel("Proof Link (attachment/message URL)")
     .setStyle(TextInputStyle.Paragraph)
     .setRequired(true);
 
