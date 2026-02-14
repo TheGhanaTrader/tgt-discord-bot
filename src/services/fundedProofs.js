@@ -145,7 +145,7 @@ function dashboardComponents() {
 }
 
 async function findPinnedDashboardMessage(channel) {
-  const pins = await channel.messages.fetchPinned().catch(() => null);
+  const pins = await channel.messages.fetchPins().catch(() => null);
   if (!pins) return null;
 
   // Prefer marker, fallback title-only
