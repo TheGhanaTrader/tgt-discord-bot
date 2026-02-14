@@ -192,9 +192,24 @@ async function ensurePayoutDashboard(client) {
 
   const msg = await findPinnedDashboardMessage(ch, client).catch(() => null);
   if (!msg) {
-    console.warn("[PAYOUT_DASHBOARD] No pinned dashboard found — edit-only mode (no repost).");
-    return;
-  }
+  console.warn("[PAYOUT_DASHBOARD] No pinned dashboard found — creating one-time pinned dashboard.");
+
+  msg = await ch
+    .send({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
+    .catch((e) => {
+      console.error("[PAYOUT_DASHBOARD] send failed", String(e?.message || e));
+      return null;
+    });
+
+  if (!msg) return;
+
+  await msg.pin().catch((e) => {
+    console.error("[PAYOUT_DASHBOARD] pin failed", String(e?.message || e));
+  });
+
+  console.log("[PAYOUT_DASHBOARD] created and pinned");
+  return; // IMPORTANT: stop here (don’t fall through)
+}
 
   await msg
     .edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
