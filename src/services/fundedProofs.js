@@ -176,18 +176,35 @@ async function ensureFundedDashboard(client) {
   });
   if (!totals) return;
 
-  const msg = await findPinnedDashboardMessage(ch, client).catch(() => null);
-  if (!msg) {
-    console.warn("[FUNDED_DASHBOARD] No pinned dashboard found — edit-only mode (no repost).");
-    return;
-  }
+  let msg = await findPinnedDashboardMessage(ch, client).catch(() => null);
 
-  await msg
-    .edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
-    .catch((e) => console.error("[FUNDED_DASHBOARD] edit failed", String(e?.message || e)));
+if (!msg) {
+  console.warn("[FUNDED_DASHBOARD] No pinned dashboard found — creating one-time pinned dashboard.");
 
-  console.log("[FUNDED_DASHBOARD] done");
+  msg = await ch
+    .send({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
+    .catch((e) => {
+      console.error("[FUNDED_DASHBOARD] send failed", String(e?.message || e));
+      return null;
+    });
+
+  if (!msg) return;
+
+  await msg.pin().catch((e) => {
+    console.error("[FUNDED_DASHBOARD] pin failed", String(e?.message || e));
+  });
+
+  console.log("[FUNDED_DASHBOARD] created and pinned");
+  return; // IMPORTANT: stop here (don’t fall through)
 }
+}
+
+// EDIT ONLY — NEVER POST AGAIN
+await msg
+  .edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
+  .catch((e) => console.error("[FUNDED_DASHBOARD] edit failed", String(e?.message || e)));
+
+console.log("[FUNDED_DASHBOARD] done");
 
 // ---------------- Embeds / UI ----------------
 function buildFundedSubmitModal() {
