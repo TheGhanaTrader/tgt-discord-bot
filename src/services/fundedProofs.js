@@ -36,6 +36,8 @@ const REVIEW_QUEUE_ID = String(
 const LOGO_URL = String(process.env.TGT_LOGO_URL || "").trim();
 
 const DASH_MARKER = "TGT_FUNDED_DASHBOARD";
+const GENERAL_CHAT_ID = String(process.env.GENERAL_CHAT_CHANNEL_ID || "").trim();
+const VERIFIED_FUNDED_ARCHIVE_ID = String(process.env.VERIFIED_FUNDED_ACCOUNTS_CHANNEL_ID || "").trim();
 
 function monthKeyUTC(d = new Date()) {
   const y = d.getUTCFullYear();
@@ -333,7 +335,7 @@ function reviewButtons(submissionId) {
   ];
 }
 
-function verifiedPublicEmbed(payload, userId, totalsAfter) {
+function verifiedPublicEmbed(payload, userId, totalsAfter, proofImageUrl) {
   const e = new EmbedBuilder()
     .setTitle("✅ Verified Funded Account")
     .setDescription(
@@ -360,6 +362,7 @@ function verifiedPublicEmbed(payload, userId, totalsAfter) {
     .setTimestamp(new Date());
 
   if (LOGO_URL) e.setThumbnail(LOGO_URL);
+  if (proofImageUrl) e.setImage(proofImageUrl);
   return e;
 }
 
@@ -405,6 +408,36 @@ async function markRejected(id, reviewerId, reason) {
     "UPDATE proof_submissions SET status='rejected', reviewer_id=$2, reviewed_at=NOW(), reject_reason=$3 WHERE id=$1",
     [id, reviewerId, reason]
   );
+}
+
+async function resolveProofImageUrl(client, proofLink) {
+  const link = String(proofLink || "").trim();
+  if (!link) return null;
+
+  // If it's a direct image URL
+  if (/^https?:\/\/.+\.(png|jpe?g|gif|webp)(\?.*)?$/i.test(link)) return link;
+
+  // If it's a Discord message link: /channels/guildId/channelId/messageId
+  const m = link.match(/discord\.com\/channels\/(\d+)\/(\d+)\/(\d+)/);
+  if (!m) return null;
+
+  const channelId = m[2];
+  const messageId = m[3];
+
+  const ch = await client.channels.fetch(channelId).catch(() => null);
+  if (!ch || !ch.isTextBased()) return null;
+
+  const msg = await ch.messages.fetch(messageId).catch(() => null);
+  if (!msg) return null;
+
+  const att = msg.attachments?.first?.() || null;
+  if (!att) return null;
+
+  // Prefer image attachments only
+  const url = att.url || null;
+  if (!url) return null;
+
+  return url;
 }
 
 // ---------------- Interaction handler ----------------
@@ -476,23 +509,49 @@ async function handleFundedInteractions(client, interaction) {
     const payload = sub.payload;
     await markApproved(submissionId, interaction.user.id).catch(() => null);
 
-    // Write to funded ledger (approved only)
-    await logFunded({
-      userId: sub.user_id,
-      firm: payload.firm,
-      accountSize: payload.accountSize,
-      status: payload.status,
-      fundedDate: payload.fundedDate,
-    }).catch(() => null);
+    // 1) Persist to Postgres (THIS is what makes dashboard totals update)
+await pool.query(
+  `INSERT INTO prop_funded (id, user_id, firm, account_size, status, funded_date, month_key, year_key, created_at)
+   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,NOW())`,
+  [
+    crypto.randomUUID(),
+    sub.user_id,
+    payload.firm,
+    payload.accountSize,
+    payload.status,
+    payload.fundedDate || null,
+    monthKeyUTC(),
+    yearKeyUTC(),
+  ]
+).catch(() => null);
 
-    // Post public verified embed + update dashboard
-    const fundedCh = await client.channels.fetch(FUNDED_CHANNEL_ID).catch(() => null);
-    const totalsAfter = await computeFundedTotals().catch(() => null);
+// Keep your existing log (optional / no harm)
+await logFunded({
+  userId: sub.user_id,
+  firm: payload.firm,
+  accountSize: payload.accountSize,
+  status: payload.status,
+  fundedDate: payload.fundedDate,
+}).catch(() => null);
 
-    if (fundedCh && fundedCh.isTextBased() && totalsAfter) {
-      await fundedCh.send({ embeds: [verifiedPublicEmbed(payload, sub.user_id, totalsAfter)] }).catch(() => null);
-      await ensureFundedDashboard(client).catch(() => null);
-    }
+// 2) Recompute totals + refresh dashboard (EDIT ONLY)
+const totalsAfter = await computeFundedTotals().catch(() => null);
+await ensureFundedDashboard(client).catch(() => null);
+
+// 3) Resolve proof image and post congrats to General + Archive (NOT the dashboard channel)
+const proofImageUrl = await resolveProofImageUrl(client, payload.proofLink).catch(() => null);
+const congratsEmbed = totalsAfter
+  ? verifiedPublicEmbed(payload, sub.user_id, totalsAfter, proofImageUrl)
+  : verifiedPublicEmbed(payload, sub.user_id, { prevMonth:0,thisMonth:0,ytd:0,all:0,liveCapital:0,liveAccounts:0 }, proofImageUrl);
+
+const targets = [GENERAL_CHAT_ID, VERIFIED_FUNDED_ARCHIVE_ID].filter(Boolean);
+
+for (const channelId of targets) {
+  const c = await client.channels.fetch(channelId).catch(() => null);
+  if (c && c.isTextBased()) {
+    await c.send({ embeds: [congratsEmbed] }).catch(() => null);
+  }
+}
 
     // DM member approved
     const user = await client.users.fetch(sub.user_id).catch(() => null);
