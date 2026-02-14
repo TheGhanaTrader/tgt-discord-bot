@@ -234,52 +234,17 @@ async function ensureFundedDashboard(client) {
 
   if (!totals) return;
 
-  let msg = await findPinnedDashboardMessage(ch).catch((e) => {
-    console.error(
-      "[FUNDED_DASHBOARD] findPinnedDashboardMessage failed",
-      String(e?.message || e)
-    );
-    return null;
-  });
+  let msg = await findPinnedDashboardMessage(ch).catch(() => null);
 
-  if (!msg) {
-    msg = await ch
-      .send({
-        embeds: [dashboardEmbed(totals)],
-        components: dashboardComponents(),
-      })
-      .catch((e) => {
-        console.error(
-          "[FUNDED_DASHBOARD] send failed",
-          String(e?.message || e)
-        );
-        return null;
-      });
-    if (!msg) return; // prevents msg.edit crash
-  }
-
-  await msg
-    .edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() })
-    .catch((e) =>
-      console.error("[FUNDED_DASHBOARD] edit failed", String(e?.message || e))
-    );
-
-  const pins = await ch.messages.fetchPinned().catch((e) => {
-    console.error(
-      "[FUNDED_DASHBOARD] fetchPinned failed",
-      String(e?.message || e)
-    );
-    return null;
-  });
-
-  const isPinned = pins?.some((p) => p.id === msg.id);
-  if (!isPinned) {
-    await msg
-      .pin()
-      .catch((e) =>
-        console.error("[FUNDED_DASHBOARD] pin failed", String(e?.message || e))
-      );
-  }
+if (!msg) {
+  // Create ONCE + pin ONCE
+  msg = await ch.send({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() }).catch(() => null);
+  if (!msg) return;
+  await msg.pin().catch(() => null);
+} else {
+  // Edit ONLY (never repost)
+  await msg.edit({ embeds: [dashboardEmbed(totals)], components: dashboardComponents() }).catch(() => null);
+}
 
   console.log("[FUNDED_DASHBOARD] done");
 }
