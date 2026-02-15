@@ -1,7 +1,16 @@
 "use strict";
 
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require("discord.js");
+const {
+  EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
+} = require("discord.js");
 const { Pool } = require("pg");
+const crypto = require("crypto");
 
 // ---------------- ENV / PG ----------------
 const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
@@ -17,11 +26,17 @@ const pool = new Pool({
 // Where the ONE pinned dashboard lives
 const GIVEAWAY_DASHBOARD_CHANNEL_ID = String(process.env.GIVEAWAY_DASHBOARD_CHANNEL_ID || "").trim();
 
+// Uses your existing staff queue (same as funded/payout)
+const REVIEW_QUEUE_ID = String(process.env.PROOF_REVIEW_QUEUE_CHANNEL_ID || "").trim();
+
 // Marker to identify the right pinned message
 const DASH_MARKER = "TGT_GIVEAWAY_DASHBOARD";
 
 // Optional branding
 const LOGO_URL = String(process.env.TGT_LOGO_URL || "").trim();
+
+// IMPORTANT: title must match exactly everywhere
+const DASH_TITLE = "🎁 Prop Firm Giveaways Dashboard";
 
 // ---------------- Helpers ----------------
 function monthKeyUTC(d = new Date()) {
@@ -32,7 +47,6 @@ function monthKeyUTC(d = new Date()) {
 function yearKeyUTC(d = new Date()) {
   return String(d.getUTCFullYear());
 }
-
 function fmtMoneyUSD(n) {
   const v = Number(n || 0);
   const abs = Math.abs(v);
@@ -47,7 +61,6 @@ async function computeGiveawayTotals() {
   const mkThis = monthKeyUTC();
   const yk = yearKeyUTC();
 
-  // We count/value ONLY approved claims (issued joined by serial_code)
   const q = async (sql, params) => {
     const { rows } = await pool.query(sql, params);
     return rows?.[0] || {};
@@ -83,7 +96,6 @@ async function computeGiveawayTotals() {
     [mkThis]
   );
 
-  // Optional: pending claims count (operational visibility)
   const pending = await q(
     `SELECT COUNT(*)::int AS cnt
      FROM public.prop_giveaway_claims
@@ -104,10 +116,10 @@ async function computeGiveawayTotals() {
   };
 }
 
-// ---------------- Embed ----------------
+// ---------------- Embed / Components ----------------
 function giveawayDashboardEmbed(t) {
   const e = new EmbedBuilder()
-    .setTitle("🎁 Prop Firm Giveaways Dashboard")
+    .setTitle(DASH_TITLE)
     .setDescription(
       [
         "Staff-verified giveaway impact for **The Ghana Trader Desk**.",
@@ -136,6 +148,7 @@ function giveawayDashboardEmbed(t) {
         inline: false,
       }
     )
+    // ✅ marker must be here so we can find the dashboard reliably
     .setFooter({ text: `The Ghana Trader Desk • Audited Impact • ${DASH_MARKER}` })
     .setColor(0xc9a24d)
     .setTimestamp(new Date());
@@ -155,26 +168,47 @@ function giveawayDashboardComponents() {
   ];
 }
 
-// Find pinned dashboard; if missing, create+pin once; else edit forever.
+// ---------------- Dashboard Finders ----------------
 async function findPinnedDashboardMessage(channel, client) {
   const pins = await channel.messages.fetchPins().catch(() => null);
   if (!pins) return null;
 
-  const match = pins
-    .filter((m) => {
-      if (!m.author?.bot) return false;
-      if (client?.user?.id && m.author.id !== client.user.id) return false;
-      const title = m.embeds?.[0]?.title || "";
-      if (title !== "🎁 Prop Firm Giveaways Dashboard") return false;
-      const footer = m.embeds?.[0]?.footer?.text || "";
-      return footer.includes(DASH_MARKER);
-    })
-    .sort((a, b) => b.createdTimestamp - a.createdTimestamp)
-    .first();
+  // Strict: marker-based
+  const strict = pins.filter((m) => {
+    if (!m.author?.bot) return false;
+    if (client?.user?.id && m.author.id !== client.user.id) return false;
 
-  return match || null;
+    const title = m.embeds?.[0]?.title || "";
+    if (title !== DASH_TITLE) return false;
+
+    const footer = m.embeds?.[0]?.footer?.text || "";
+    return footer.includes(DASH_MARKER);
+  });
+
+  return strict.size
+    ? strict.sort((a, b) => b.createdTimestamp - a.createdTimestamp).first()
+    : null;
 }
 
+// If nothing pinned, try to find the dashboard message in recent history and pin it.
+// This prevents duplicates after someone unpins by mistake.
+async function findRecentDashboardMessage(channel, client) {
+  const msgs = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+  if (!msgs) return null;
+
+  const found = msgs.find((m) => {
+    if (!m.author?.bot) return false;
+    if (client?.user?.id && m.author.id !== client.user.id) return false;
+
+    const title = m.embeds?.[0]?.title || "";
+    const footer = m.embeds?.[0]?.footer?.text || "";
+    return title === DASH_TITLE && footer.includes(DASH_MARKER);
+  });
+
+  return found || null;
+}
+
+// ---------------- Ensure Dashboard ----------------
 async function ensureGiveawayDashboard(client) {
   console.log("[GIVEAWAY_DASHBOARD] start", {
     ts: new Date().toISOString(),
@@ -203,10 +237,19 @@ async function ensureGiveawayDashboard(client) {
 
   let msg = await findPinnedDashboardMessage(ch, client).catch(() => null);
 
-  // Create+pin ONE TIME if missing
+  // If not pinned, try to find an existing dashboard message and pin it (no repost)
   if (!msg) {
-    console.warn("[GIVEAWAY_DASHBOARD] No pinned dashboard found — creating one-time pinned dashboard.");
+    const recent = await findRecentDashboardMessage(ch, client).catch(() => null);
+    if (recent) {
+      await recent.pin().catch(() => null);
+      msg = recent;
+      console.log("[GIVEAWAY_DASHBOARD] re-pinned existing dashboard (no repost)");
+    }
+  }
 
+  // Only create if nothing exists at all
+  if (!msg) {
+    console.warn("[GIVEAWAY_DASHBOARD] No dashboard found — creating one-time pinned dashboard.");
     msg = await ch
       .send({ embeds: [giveawayDashboardEmbed(totals)], components: giveawayDashboardComponents() })
       .catch((e) => {
@@ -232,6 +275,128 @@ async function ensureGiveawayDashboard(client) {
   console.log("[GIVEAWAY_DASHBOARD] done");
 }
 
+// ---------------- Claim UI (fixes “Interaction failed”) ----------------
+function buildClaimModal() {
+  const m = new ModalBuilder().setCustomId("giveaway_claim_modal").setTitle("Claim Giveaway Account");
+
+  const serial = new TextInputBuilder()
+    .setCustomId("serial")
+    .setLabel("Giveaway Certificate Serial Code")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  const email = new TextInputBuilder()
+    .setCustomId("email")
+    .setLabel("Email for the Prop Firm Account")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  m.addComponents(
+    new ActionRowBuilder().addComponents(serial),
+    new ActionRowBuilder().addComponents(email)
+  );
+
+  return m;
+}
+
+async function handleGiveawayInteractions(client, interaction) {
+  // Button: open modal
+  if (interaction.isButton() && interaction.customId === "giveaway_claim") {
+    await interaction.showModal(buildClaimModal());
+    return true;
+  }
+
+  // Modal: create pending claim + post to staff review queue
+  if (interaction.isModalSubmit() && interaction.customId === "giveaway_claim_modal") {
+    const serial = String(interaction.fields.getTextInputValue("serial") || "").trim().toUpperCase();
+    const email = String(interaction.fields.getTextInputValue("email") || "").trim();
+
+    if (!serial || !email) {
+      await interaction.reply({ content: "❌ Serial code and email are required.", ephemeral: true });
+      return true;
+    }
+
+    // Validate serial exists in issued table
+    const issued = await pool
+      .query("SELECT serial_code, firm, account_size, month_key, year_key FROM public.prop_giveaway_issued WHERE serial_code=$1", [serial])
+      .then((r) => r.rows?.[0] || null)
+      .catch(() => null);
+
+    if (!issued) {
+      await interaction.reply({ content: "❌ Invalid serial code. Please check your certificate and try again.", ephemeral: true });
+      return true;
+    }
+
+    const claimId = crypto.randomUUID();
+
+    // Insert pending claim (your unique index on serial_code prevents duplicates)
+    const ok = await pool
+      .query(
+        `INSERT INTO public.prop_giveaway_claims
+         (id, serial_code, claimant_user_id, email, status, created_at)
+         VALUES ($1,$2,$3,$4,'pending',NOW())`,
+        [claimId, serial, interaction.user.id, email]
+      )
+      .then(() => true)
+      .catch((e) => {
+        const msg = String(e?.message || e);
+        if (msg.includes("duplicate key") || msg.includes("uq_giveaway_claims_serial_code")) return false;
+        console.error("[GIVEAWAY_CLAIM] insert failed", msg);
+        return null;
+      });
+
+    if (ok === false) {
+      await interaction.reply({ content: "❌ This giveaway serial has already been claimed.", ephemeral: true });
+      return true;
+    }
+    if (ok === null) {
+      await interaction.reply({ content: "❌ Could not create claim. Try again.", ephemeral: true });
+      return true;
+    }
+
+    // Staff review post
+    const q = await client.channels.fetch(REVIEW_QUEUE_ID).catch(() => null);
+    if (q && q.isTextBased()) {
+      const e = new EmbedBuilder()
+        .setTitle("🎁 Giveaway Claim — Pending Review")
+        .setDescription(`Claim ID: \`${claimId}\`\nSerial: \`${serial}\``)
+        .addFields(
+          { name: "Member", value: `<@${interaction.user.id}>`, inline: true },
+          { name: "Email", value: email, inline: true },
+          { name: "Firm", value: String(issued.firm), inline: true },
+          { name: "Account Size", value: fmtMoneyUSD(issued.account_size), inline: true },
+          { name: "Month", value: String(issued.month_key), inline: true },
+          { name: "Year", value: String(issued.year_key), inline: true }
+        )
+        .setColor(0xc9a24d)
+        .setTimestamp(new Date());
+
+      if (LOGO_URL) e.setThumbnail(LOGO_URL);
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`giveaway_claim_approve:${claimId}`).setLabel("✅ Approve").setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`giveaway_claim_reject:${claimId}`).setLabel("❌ Reject").setStyle(ButtonStyle.Danger)
+      );
+
+      await q.send({ embeds: [e], components: [row] }).catch(() => null);
+    }
+
+    await interaction.reply({
+      content: "✅ Claim submitted for staff review. You’ll receive a DM after approval or rejection.",
+      ephemeral: true,
+    });
+
+    await interaction.user.send(
+      `✅ Giveaway claim received.\nSerial: ${serial}\nYou will be notified after staff review.`
+    ).catch(() => null);
+
+    return true;
+  }
+
+  return false;
+}
+
 module.exports = {
   ensureGiveawayDashboard,
+  handleGiveawayInteractions,
 };
