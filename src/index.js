@@ -12,6 +12,7 @@ const { startSubscriptionMonitor } = require("./jobs/subscriptionMonitor");
 const referrals = require("./services/referrals");
 const { ensureFundedDashboard, handleFundedInteractions } = require("./services/fundedProofs");
 const { ensurePayoutDashboard, handlePayoutInteractions } = require("./services/payoutProofs");
+const { ensureGiveawayDashboard } = require("./services/giveawayDashboard");
 const { ensureContractGateMessage } = require("./services/contractGatePoster");
 
 const fs = require("fs");
@@ -167,6 +168,7 @@ client.once(Events.ClientReady, async (c) => {
   setDiscordClient(client);
   await ensureFundedDashboard(client).catch((e) => console.error("FUNDED_DASHBOARD_BOOT_ERR", e));
   await ensurePayoutDashboard(client).catch((e) => console.error("PAYOUT_DASHBOARD_BOOT_ERR", e));
+  await ensureGiveawayDashboard(client);
   await ensureContractGateMessage(client).catch((e) =>
   console.error("CONTRACT_GATE_BOOT_ERR", e)
 );
