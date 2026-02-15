@@ -225,6 +225,7 @@ client.on("guildMemberAdd", async (member) => {
     const guild = member.guild;
 
     const before = client._inviteCache.get(guild.id) || new Map();
+
     const invites = await guild.invites.fetch().catch(() => null);
     if (!invites) return;
 
@@ -232,16 +233,34 @@ client.on("guildMemberAdd", async (member) => {
     invites.forEach((inv) => after.set(inv.code, inv.uses ?? 0));
     client._inviteCache.set(guild.id, after);
 
-    // Find which invite increased
-    let usedInvite = null;
+    // ✅ CRITICAL GUARD:
+    // If our cache was empty, we cannot safely attribute this join.
+    // (Otherwise we'd falsely credit the oldest invite with uses>0 — usually admin.)
+    if (!before.size) {
+      console.log("⚠️ REF SKIP: invite cache was empty; join attribution skipped for", member.id);
+      return;
+    }
+
+    // Find which invite increased (prefer exact +1)
+    const used = [];
     for (const inv of invites.values()) {
-      const prev = before.get(inv.code) ?? 0;
+      const prev = before.get(inv.code);
       const now = inv.uses ?? 0;
-      if (now > prev) {
-        usedInvite = inv;
-        break;
+      if (prev !== undefined && now > prev) {
+        used.push({ inv, delta: now - prev });
       }
     }
+
+    // If none or multiple changed, don’t guess
+    if (used.length !== 1) {
+      console.log(
+        "⚠️ REF SKIP: cannot uniquely detect invite used",
+        { memberId: member.id, changed: used.length }
+      );
+      return;
+    }
+
+    const usedInvite = used[0].inv;
 
     if (!usedInvite?.inviter?.id) return;
 
