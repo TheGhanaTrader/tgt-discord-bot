@@ -396,6 +396,28 @@ async function handleGiveawayInteractions(client, interaction) {
   return false;
 }
 
+async function handleGiveawayInteractions(client, interaction) {
+  try {
+    // ✅ Button: Claim Giveaway
+    if (interaction.isButton() && interaction.customId === "giveaway_claim") {
+      return interaction.reply({
+        content: "✅ Claim flow is wired. Next step: we’ll connect the claim modal + review approvals.",
+        ephemeral: true,
+      });
+    }
+
+    return false;
+  } catch (e) {
+    console.error("[GIVEAWAY] Interaction error:", e);
+    try {
+      if (!interaction.replied && !interaction.deferred) {
+        await interaction.reply({ content: "❌ Giveaway interaction failed.", ephemeral: true });
+      }
+    } catch (_) {}
+    return true;
+  }
+}
+
 module.exports = {
   ensureGiveawayDashboard,
   handleGiveawayInteractions,
