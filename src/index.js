@@ -224,8 +224,9 @@ client.on("guildMemberAdd", async (member) => {
   try {
     const guild = member.guild;
 
-    const before = client._inviteCache.get(guild.id) || new Map();
-
+    // ✅ Keep invite cache updated (for accuracy), but DO NOT map referrals from invite creator.
+    // Referral ownership must come from /r?ref=... → OAuth bind (paystackWebhook.js),
+    // otherwise DISCORD_INVITE_URL (admin-created) will steal all credit.
     const invites = await guild.invites.fetch().catch(() => null);
     if (!invites) return;
 
@@ -233,47 +234,11 @@ client.on("guildMemberAdd", async (member) => {
     invites.forEach((inv) => after.set(inv.code, inv.uses ?? 0));
     client._inviteCache.set(guild.id, after);
 
-    // ✅ CRITICAL GUARD:
-    // If our cache was empty, we cannot safely attribute this join.
-    // (Otherwise we'd falsely credit the oldest invite with uses>0 — usually admin.)
-    if (!before.size) {
-      console.log("⚠️ REF SKIP: invite cache was empty; join attribution skipped for", member.id);
-      return;
-    }
-
-    // Find which invite increased (prefer exact +1)
-    const used = [];
-    for (const inv of invites.values()) {
-      const prev = before.get(inv.code);
-      const now = inv.uses ?? 0;
-      if (prev !== undefined && now > prev) {
-        used.push({ inv, delta: now - prev });
-      }
-    }
-
-    // If none or multiple changed, don’t guess
-    if (used.length !== 1) {
-      console.log(
-        "⚠️ REF SKIP: cannot uniquely detect invite used",
-        { memberId: member.id, changed: used.length }
-      );
-      return;
-    }
-
-    const usedInvite = used[0].inv;
-
-    if (!usedInvite?.inviter?.id) return;
-
-    // ✅ Store mapping ONLY (do NOT count join here)
-    const r = referrals.mapInvite(String(member.id), String(usedInvite.inviter.id), { source: "invite" });
-    if (r?.ok) {
-      console.log("✅ REF MAP (JOIN):", member.id, "<-", usedInvite.inviter.id);
-    }
+    console.log("✅ Invite cache updated for join:", member.id);
   } catch (e) {
-    console.log("GUILD_MEMBER_ADD_REF_ERR:", e?.message || e);
+    console.log("GUILD_MEMBER_ADD_ERR:", e?.message || e);
   }
 });
-
 
 // ===== INTERACTIONS =====
 client.on(Events.InteractionCreate, async (interaction) => {
