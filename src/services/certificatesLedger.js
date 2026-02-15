@@ -45,6 +45,7 @@ function recordCertificate({
   category,
   rankLabel,
   rewardLabel,
+  rewardClaimable,
   code,
   filePath,
 }) {
@@ -66,6 +67,10 @@ function recordCertificate({
     code: normalized,
     filePath: filePath || null,
     createdAt: Date.now(),
+    rewardClaimable: typeof rewardClaimable === "boolean" ? rewardClaimable : undefined,
+    claimed: false,
+    claimedAt: null,
+    claimedBy: null,
   };
 
   db.issued = Array.isArray(db.issued) ? db.issued : [];
@@ -92,8 +97,44 @@ function getUserCertificates(userId, monthKey = null) {
   return filtered.filter((x) => x.monthKey === String(monthKey));
 }
 
+function claimCertificateByCode(code, userId) {
+  const db = readDB();
+
+  const normalized = String(code || "").trim().toUpperCase();
+  if (!normalized) return { ok: false, reason: "missing_code" };
+
+  const cert = db.indexByCode?.[normalized] || null;
+  if (!cert) return { ok: false, reason: "not_found" };
+
+  // Only the winner can claim their own certificate
+  if (String(cert.userId || "") !== String(userId || "")) {
+    return { ok: false, reason: "not_owner" };
+  }
+
+  // If not claimable, block
+  const claimable =
+    typeof cert.rewardClaimable === "boolean"
+      ? cert.rewardClaimable
+      : String(cert.rewardLabel || "").trim().toLowerCase() !== "top 10 recognition";
+
+  if (!claimable) return { ok: false, reason: "not_claimable" };
+
+  // Already claimed
+  if (cert.claimed) return { ok: false, reason: "already_claimed" };
+
+  cert.claimed = true;
+  cert.claimedAt = Date.now();
+  cert.claimedBy = String(userId || "");
+
+  // Persist
+  writeDB(db);
+
+  return { ok: true, cert };
+}
+
 module.exports = {
   recordCertificate,
   findCertificateByCode,
   getUserCertificates,
+  claimCertificateByCode,
 };
