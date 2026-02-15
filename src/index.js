@@ -265,7 +265,7 @@ client.on("guildMemberAdd", async (member) => {
     if (!usedInvite?.inviter?.id) return;
 
     // ✅ Store mapping ONLY (do NOT count join here)
-    const r = referrals.mapInvite(String(member.id), String(usedInvite.inviter.id));
+    const r = referrals.mapInvite(String(member.id), String(usedInvite.inviter.id), { source: "invite" });
     if (r?.ok) {
       console.log("✅ REF MAP (JOIN):", member.id, "<-", usedInvite.inviter.id);
     }

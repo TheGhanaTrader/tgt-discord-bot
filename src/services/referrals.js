@@ -42,32 +42,62 @@ function getMonthKey(d = new Date()) {
 }
 
 /**
- * mapInvite(memberId, inviterId)
- * Saves who referred who (one-time, does not overwrite).
+ * mapInvite(memberId, inviterId, opts?)
+ * Saves who referred who.
+ *
+ * IMPORTANT:
+ * - Default behavior: do NOT overwrite existing mapping.
+ * - BUT: allow WEB referral to override an INVITE mapping
+ *   ONLY if the user has not been counted (join) and not converted (sale).
  */
-function mapInvite(memberId, inviterId) {
+function mapInvite(memberId, inviterId, opts = {}) {
+  const source = String(opts.source || "invite"); // "invite" | "web"
+
   if (!memberId || !inviterId) return { ok: false, reason: "missing_params" };
   if (memberId === inviterId) return { ok: false, reason: "self_referral" };
 
   const db = readDB();
 
- // Don't overwrite if already mapped (rejoin anti-farm)
-// Also record that they tried to remap (for later staff review)
-if (db.referredUsers[memberId]) {
-  const row = db.referredUsers[memberId];
-  row.remapAttempts = Number(row.remapAttempts || 0) + 1;
-  row.lastRemapAttemptAt = Date.now();
-  db.referredUsers[memberId] = row;
-  writeDB(db);
-  return { ok: false, reason: "already_mapped" };
-}
+  const existing = db.referredUsers[memberId] || null;
 
+  // ✅ If already mapped, only allow a VERY specific override:
+  // web overrides invite ONLY BEFORE any counting/conversion
+  if (existing) {
+    const canOverride =
+      source === "web" &&
+      String(existing.source || "invite") === "invite" &&
+      !existing.joinedCountedAt &&
+      !existing.convertedAt;
+
+    if (!canOverride) {
+      // Keep your remap audit
+      existing.remapAttempts = Number(existing.remapAttempts || 0) + 1;
+      existing.lastRemapAttemptAt = Date.now();
+      db.referredUsers[memberId] = existing;
+      writeDB(db);
+      return { ok: false, reason: "already_mapped" };
+    }
+
+    // ✅ Perform the override (web wins)
+    db.referredUsers[memberId] = {
+      ...existing,
+      affiliateId: inviterId,
+      source: "web",
+      // keep original joinedAt if you want; or reset:
+      joinedAt: Date.now(),
+    };
+
+    writeDB(db);
+    return { ok: true, overridden: true };
+  }
+
+  // New mapping
   db.referredUsers[memberId] = {
     affiliateId: inviterId,
+    source,
     joinedAt: Date.now(),
-    joinedCountedAt: null, // ✅ join counts ONCE (when contract accepted)
-    // we will set this after first paid conversion
-    convertedAt: null,
+    joinedCountedAt: null, // join counts ONCE (when contract accepted)
+    convertedAt: null,     // first paid conversion only
   };
 
   writeDB(db);
