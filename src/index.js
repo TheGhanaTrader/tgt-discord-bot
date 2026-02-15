@@ -260,6 +260,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (await handleFundedInteractions(client, interaction)) return;
     if (await handleFundedInteractions(client, interaction)) return;
     if (await handlePayoutInteractions(client, interaction)) return;
+    if (await handleGiveawayInteractions(client, interaction)) return;
 
     // Inject TGT context for BOTH buttons and slash commands
     attachTgtContext(interaction);
