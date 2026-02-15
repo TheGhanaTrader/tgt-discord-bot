@@ -13,6 +13,8 @@ module.exports = {
   async execute(interaction) {
     await interaction.deferReply({ ephemeral: true });
 
+    console.log("[MYREF] PUBLIC_BASE_URL =", JSON.stringify(process.env.PUBLIC_BASE_URL || ""));
+
     const base = cleanBase(process.env.PUBLIC_BASE_URL);
     if (!base) {
       return interaction.editReply(
