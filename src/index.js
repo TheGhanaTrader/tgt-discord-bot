@@ -10,9 +10,12 @@ const { setDiscordClient } = require("./discordRoles");
 const { startPaystackWebhookServer } = require("./server/paystackWebhook");
 const { startSubscriptionMonitor } = require("./jobs/subscriptionMonitor");
 const referrals = require("./services/referrals");
+const {
+  ensureGiveawayDashboard,
+  handleGiveawayDashboardInteractions,
+} = require("./services/giveawayDashboard");
 const { ensureFundedDashboard, handleFundedInteractions } = require("./services/fundedProofs");
 const { ensurePayoutDashboard, handlePayoutInteractions } = require("./services/payoutProofs");
-const { ensureGiveawayDashboard } = require("./services/giveawayDashboard");
 const { ensureContractGateMessage } = require("./services/contractGatePoster");
 
 const fs = require("fs");
