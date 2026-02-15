@@ -21,7 +21,7 @@ function inferClaimable(c) {
 
 function statusLabel(c) {
   const claimable = inferClaimable(c);
-  if (!claimable) return "🏅 Recognition";
+  if (!claimable) return "🆓 Recognition";
   return c.claimed ? "🟢 Claimed" : "🔵 Unclaimed";
 }
 
