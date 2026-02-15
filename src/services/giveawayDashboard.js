@@ -418,7 +418,72 @@ async function handleGiveawayInteractions(client, interaction) {
   }
 }
 
+// ---------------- Interaction handler (Claim Giveaway) ----------------
+async function handleGiveawayDashboardInteractions(client, interaction) {
+  try {
+    // A) Button: open claim modal
+    if (interaction.isButton() && interaction.customId === "giveaway_claim") {
+      const { ModalBuilder, ActionRowBuilder, TextInputBuilder, TextInputStyle } = require("discord.js");
+
+      const modal = new ModalBuilder()
+        .setCustomId("giveaway_claim_modal")
+        .setTitle("Claim Giveaway Account");
+
+      const serial = new TextInputBuilder()
+        .setCustomId("serial_code")
+        .setLabel("Certificate Serial Code")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      const email = new TextInputBuilder()
+        .setCustomId("email")
+        .setLabel("Your Email (for account setup)")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      modal.addComponents(
+        new ActionRowBuilder().addComponents(serial),
+        new ActionRowBuilder().addComponents(email)
+      );
+
+      await interaction.showModal(modal);
+      return true;
+    }
+
+    // B) Modal submit: for now just acknowledge (we’ll wire DB + review queue next)
+    if (interaction.isModalSubmit() && interaction.customId === "giveaway_claim_modal") {
+      const serial = interaction.fields.getTextInputValue("serial_code")?.trim();
+      const email = interaction.fields.getTextInputValue("email")?.trim();
+
+      if (!serial || !email) {
+        await interaction.reply({ content: "❌ Missing serial code or email.", ephemeral: true });
+        return true;
+      }
+
+      await interaction.reply({
+        content: "✅ Claim received. Staff will review and DM you your account details after approval.",
+        ephemeral: true,
+      });
+
+      return true;
+    }
+
+    return false;
+  } catch (e) {
+    console.error("[GIVEAWAY] handler error:", e);
+    try {
+      if (interaction.deferred || interaction.replied) {
+        await interaction.followUp({ content: "❌ Claim failed.", ephemeral: true });
+      } else {
+        await interaction.reply({ content: "❌ Claim failed.", ephemeral: true });
+      }
+    } catch (_) {}
+    return true;
+  }
+}
+
 module.exports = {
   ensureGiveawayDashboard,
   handleGiveawayInteractions,
+  handleGiveawayDashboardInteractions,
 };
