@@ -484,6 +484,5 @@ async function handleGiveawayDashboardInteractions(client, interaction) {
 
 module.exports = {
   ensureGiveawayDashboard,
-  handleGiveawayInteractions,
   handleGiveawayDashboardInteractions,
 };
