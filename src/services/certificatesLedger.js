@@ -24,7 +24,12 @@ function pool() {
 }
 
 function defaultDB() {
-  return { issued: [], indexByCode: {} };
+  return {
+    issued: [],
+    indexByCode: {},
+    legacy: [],
+    legacyIndexByCode: {},
+  };
 }
 
 async function readDB() {
@@ -37,6 +42,14 @@ async function readDB() {
     const db = raw && typeof raw === "object" ? raw : {};
     db.issued = Array.isArray(db.issued) ? db.issued : [];
     db.indexByCode = db.indexByCode && typeof db.indexByCode === "object" ? db.indexByCode : {};
+
+    // legacy support (for /verifycert legacy:true)
+    db.legacy = Array.isArray(db.legacy) ? db.legacy : [];
+    db.legacyIndexByCode =
+      db.legacyIndexByCode && typeof db.legacyIndexByCode === "object"
+        ? db.legacyIndexByCode
+        : {};
+
     return db;
   } catch {
     return defaultDB();
@@ -46,8 +59,15 @@ async function readDB() {
 async function writeDB(db) {
   const p = pool();
   const safe = db && typeof db === "object" ? db : defaultDB();
+
   safe.issued = Array.isArray(safe.issued) ? safe.issued : [];
   safe.indexByCode = safe.indexByCode && typeof safe.indexByCode === "object" ? safe.indexByCode : {};
+
+  safe.legacy = Array.isArray(safe.legacy) ? safe.legacy : [];
+  safe.legacyIndexByCode =
+    safe.legacyIndexByCode && typeof safe.legacyIndexByCode === "object"
+      ? safe.legacyIndexByCode
+      : {};
 
   const q = `
     INSERT INTO public.job_state (job_key, state_json, updated_at)
@@ -110,7 +130,7 @@ async function withLock(fn, ttlSeconds = 20) {
  * - TOP10_SALES
  * - TOP10_REFERRALS
  *
- * NOTE: now async because Postgres
+ * NOTE: async because Postgres
  */
 async function recordCertificate({
   monthKey,
@@ -201,8 +221,7 @@ async function claimCertificateByCode(code, userId) {
     const claimable =
       typeof cert.rewardClaimable === "boolean"
         ? cert.rewardClaimable
-        : String(cert.rewardLabel || "").trim().toLowerCase() !==
-          "top 10 recognition";
+        : String(cert.rewardLabel || "").trim().toLowerCase() !== "top 10 recognition";
 
     if (!claimable) return { ok: false, reason: "not_claimable" };
 
@@ -220,9 +239,65 @@ async function claimCertificateByCode(code, userId) {
   });
 }
 
+/* -------------------- legacy support -------------------- */
+
+function normalizeCode(input) {
+  return String(input || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+async function findLegacyByCode(code) {
+  const db = await readDB();
+  const normalized = normalizeCode(code);
+  if (!normalized) return null;
+  return db.legacyIndexByCode?.[normalized] || null;
+}
+
+async function markLegacyCertificate({ code, markedByUserId, note }) {
+  const normalized = normalizeCode(code);
+  if (!normalized) return { ok: false, reason: "missing_code" };
+
+  return withLock(async ({ locked }) => {
+    if (!locked) return { ok: false, reason: "busy_try_again" };
+
+    const db = await readDB();
+
+    // If it exists as a real issued cert, do not mark legacy (prevents conflicts)
+    if (db.indexByCode?.[normalized]) {
+      return { ok: false, reason: "already_issued_cert" };
+    }
+
+    // idempotent legacy mark
+    if (db.legacyIndexByCode?.[normalized]) {
+      return { ok: true, already: true, entry: db.legacyIndexByCode[normalized] };
+    }
+
+    const entry = {
+      code: normalized,
+      createdAt: Date.now(),
+      markedByUserId: String(markedByUserId || ""),
+      note: String(note || "").trim() || null,
+    };
+
+    db.legacy = Array.isArray(db.legacy) ? db.legacy : [];
+    db.legacyIndexByCode =
+      db.legacyIndexByCode && typeof db.legacyIndexByCode === "object"
+        ? db.legacyIndexByCode
+        : {};
+
+    db.legacy.push(entry);
+    db.legacyIndexByCode[normalized] = entry;
+
+    await writeDB(db);
+
+    return { ok: true, already: false, entry };
+  });
+}
+
 module.exports = {
   recordCertificate,
   findCertificateByCode,
   getUserCertificates,
   claimCertificateByCode,
+  findLegacyByCode,
+  markLegacyCertificate,
 };
