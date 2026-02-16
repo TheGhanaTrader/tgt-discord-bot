@@ -101,7 +101,7 @@ async function handleContractAccept(interaction) {
       });
     }
 
-    // Record acceptance (idempotent enough because we guard above)
+    // Record acceptance
     const rec = recordAcceptance({
       userId: user.id,
       username,
@@ -110,11 +110,17 @@ async function handleContractAccept(interaction) {
       pdfPath: pdf.outPath,
     });
 
+    if (!rec?.ok) {
+      interaction.client._locks.delete(key);
+      return interaction.editReply("❌ Could not record contract acceptance. Try again.");
+    }
+
     // ✅ STEP 2: Count REFERRAL JOIN ONLY on contract acceptance (NOT on server join)
-    if (!rec?.ok) return;
     try {
       const memberId = String(user.id);
-      const referrerId = refs.getReferrerByInvite(memberId);
+
+      // ✅ Postgres referrals: async lookup
+      const referrerId = await refs.getReferrerByInvite(memberId);
 
       if (!referrerId) {
         // no mapping -> nothing to count
@@ -129,7 +135,8 @@ async function handleContractAccept(interaction) {
         if (isStaffMember(refMember)) {
           console.log("ℹ️ REF JOIN skipped (referrer is staff):", referrerId);
         } else {
-          const r = refs.bump("join", { referrerId, memberId });
+          // ✅ Postgres referrals: async bump
+          const r = await refs.bump("join", { referrerId, memberId });
 
           if (r?.ignored) {
             console.log("ℹ️ REF JOIN ignored (already counted):", memberId);
