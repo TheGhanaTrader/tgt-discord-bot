@@ -1,6 +1,8 @@
 const { SlashCommandBuilder } = require("discord.js");
 const { refreshLeaderboards } = require("../../../services/leaderboards");
 
+const EPHEMERAL = 1 << 6; // 64
+
 function isStaff(member) {
   const adminRoleId = process.env.ADMIN_ROLE_ID;
   const modRoleId = process.env.MOD_ROLE_ID;
@@ -24,7 +26,7 @@ module.exports = {
       if (!interaction.inGuild()) {
         return interaction.reply({
           content: "This command can only be used inside the server.",
-          ephemeral: true,
+          flags: EPHEMERAL,
         });
       }
 
@@ -32,13 +34,13 @@ module.exports = {
       if (!member || !isStaff(member)) {
         return interaction.reply({
           content: "🚫 Admin/Moderator only.",
-          ephemeral: true,
+          flags: EPHEMERAL,
         });
       }
 
       await interaction.reply({
         content: "🔄 Refreshing leaderboards…",
-        ephemeral: true,
+        flags: EPHEMERAL,
       });
 
       await refreshLeaderboards(interaction.client);
@@ -49,7 +51,7 @@ module.exports = {
       try {
         if (interaction.deferred) return interaction.editReply("❌ Failed to refresh.");
         if (!interaction.replied)
-          return interaction.reply({ content: "❌ Failed to refresh.", ephemeral: true });
+          return interaction.reply({ content: "❌ Failed to refresh.", flags: EPHEMERAL });
       } catch {}
     }
   },
