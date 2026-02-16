@@ -1,8 +1,5 @@
 const { SlashCommandBuilder } = require("discord.js");
-const {
-  updateReferralLeaderboard,
-  updateAffiliateLeaderboard,
-} = require("../../../services/leaderboards");
+const { refreshLeaderboards } = require("../../../services/leaderboards");
 
 function isStaff(member) {
   const adminRoleId = process.env.ADMIN_ROLE_ID;
@@ -44,8 +41,7 @@ module.exports = {
         ephemeral: true,
       });
 
-      await updateReferralLeaderboard(interaction.client);
-      await updateAffiliateLeaderboard(interaction.client);
+      await refreshLeaderboards(interaction.client);
 
       return interaction.editReply("✅ Leaderboards refreshed.");
     } catch (e) {
