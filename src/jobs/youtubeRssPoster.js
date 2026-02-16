@@ -1,32 +1,7 @@
 // src/jobs/youtubeRssPoster.js
 "use strict";
 
-const fs = require("fs");
-const path = require("path");
-
-const DATA_DIR = path.join(process.cwd(), "data");
-const STATE_FILE = path.join(DATA_DIR, "youtube-feed.json");
-
-function ensureState() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(STATE_FILE)) {
-    fs.writeFileSync(STATE_FILE, JSON.stringify({ initialized: false, lastVideoId: null }, null, 2));
-  }
-}
-
-function readState() {
-  ensureState();
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch {
-    return { initialized: false, lastVideoId: null };
-  }
-}
-
-function writeState(s) {
-  ensureState();
-  fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2));
-}
+const { getJob, setState } = require("../utils/schedulerState");
 
 async function fetchText(url) {
   // Node 18+ has fetch; fallback keeps it safe
@@ -39,11 +14,13 @@ async function fetchText(url) {
   // Fallback (rare)
   const https = require("https");
   return await new Promise((resolve, reject) => {
-    https.get(url, (r) => {
-      let data = "";
-      r.on("data", (c) => (data += c));
-      r.on("end", () => resolve(data));
-    }).on("error", reject);
+    https
+      .get(url, (r) => {
+        let data = "";
+        r.on("data", (c) => (data += c));
+        r.on("end", () => resolve(data));
+      })
+      .on("error", reject);
   });
 }
 
@@ -52,26 +29,23 @@ function parseLatestEntry(atomXml) {
   const entries = atomXml.match(/<entry>[\s\S]*?<\/entry>/g) || [];
   if (!entries.length) return null;
 
-  // Newest is usually first, but we’ll still read first safely
+  // Newest is usually first
   const e = entries[0];
 
-  const videoId =
-    (e.match(/<yt:videoId>([^<]+)<\/yt:videoId>/)?.[1] || "").trim();
+  const videoId = (e.match(/<yt:videoId>([^<]+)<\/yt:videoId>/)?.[1] || "").trim();
 
-  const title =
-    (e.match(/<title>([\s\S]*?)<\/title>/)?.[1] || "")
-      .replace(/&amp;/g, "&")
-      .replace(/&lt;/g, "<")
-      .replace(/&gt;/g, ">")
-      .replace(/&#39;/g, "'")
-      .replace(/&quot;/g, '"')
-      .trim();
+  const title = (e.match(/<title>([\s\S]*?)<\/title>/)?.[1] || "")
+    .replace(/<!\[CDATA\[|\]\]>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"')
+    .trim();
 
-  const link =
-    (e.match(/<link[^>]+href="([^"]+)"[^>]*\/>/)?.[1] || "").trim();
+  const link = (e.match(/<link[^>]+href="([^"]+)"[^>]*\/>/)?.[1] || "").trim();
 
-  const published =
-    (e.match(/<published>([^<]+)<\/published>/)?.[1] || "").trim();
+  const published = (e.match(/<published>([^<]+)<\/published>/)?.[1] || "").trim();
 
   if (!videoId || !link) return null;
 
@@ -81,16 +55,15 @@ function parseLatestEntry(atomXml) {
 async function tick(client) {
   const channelId = String(process.env.YOUTUBE_FEED_CHANNEL_ID || "").trim();
   const rssUrl = String(process.env.YOUTUBE_RSS_URL || "").trim();
-
   if (!channelId || !rssUrl) return;
 
   const ch =
     client.channels.cache.get(channelId) ||
     (await client.channels.fetch(channelId).catch(() => null));
-
   if (!ch || !ch.isTextBased()) return;
 
-  const state = readState();
+  const row = await getJob("rss_youtube");
+  const state = row?.state || { initialized: false, lastVideoId: null };
 
   let xml;
   try {
@@ -105,9 +78,10 @@ async function tick(client) {
 
   // First boot: initialize without spamming backlog
   if (!state.initialized) {
-    state.initialized = true;
-    state.lastVideoId = latest.videoId;
-    writeState(state);
+    await setState("rss_youtube", {
+      initialized: true,
+      lastVideoId: latest.videoId,
+    });
     console.log("✅ YOUTUBE_FEED_INITIALIZED:", latest.videoId);
     return;
   }
@@ -119,8 +93,7 @@ async function tick(client) {
   const msg = `▶️ **New YouTube upload**: ${latest.title}\n${latest.link}`;
   await ch.send(msg).catch(() => null);
 
-  state.lastVideoId = latest.videoId;
-  writeState(state);
+  await setState("rss_youtube", { lastVideoId: latest.videoId });
 
   console.log("✅ YOUTUBE_FEED_POSTED:", latest.videoId);
 }
