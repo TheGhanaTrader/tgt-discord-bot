@@ -1,32 +1,104 @@
 // src/services/certificatesLedger.js
-const fs = require("fs");
-const path = require("path");
+"use strict";
 
-const DATA_DIR = path.join(process.cwd(), "data");
-const FILE = path.join(DATA_DIR, "certificatesLedger.json");
+const os = require("os");
+const crypto = require("crypto");
+const { Pool } = require("pg");
 
-function ensure() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(FILE)) {
-    fs.writeFileSync(
-      FILE,
-      JSON.stringify({ issued: [], indexByCode: {} }, null, 2)
-    );
-  }
+const JOB_KEY = "certificates_ledger";
+
+let _pool = null;
+
+function pool() {
+  if (_pool) return _pool;
+
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error("DATABASE_URL is required (certificates ledger in Postgres)");
+
+  _pool = new Pool({
+    connectionString: url,
+    ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
+  });
+
+  return _pool;
 }
 
-function readDB() {
-  ensure();
+function defaultDB() {
+  return { issued: [], indexByCode: {} };
+}
+
+async function readDB() {
   try {
-    return JSON.parse(fs.readFileSync(FILE, "utf8"));
+    const p = pool();
+    const q = `SELECT state_json FROM public.job_state WHERE job_key = $1 LIMIT 1`;
+    const { rows } = await p.query(q, [JOB_KEY]);
+    const raw = rows?.[0]?.state_json;
+
+    const db = raw && typeof raw === "object" ? raw : {};
+    db.issued = Array.isArray(db.issued) ? db.issued : [];
+    db.indexByCode = db.indexByCode && typeof db.indexByCode === "object" ? db.indexByCode : {};
+    return db;
   } catch {
-    return { issued: [], indexByCode: {} };
+    return defaultDB();
   }
 }
 
-function writeDB(db) {
-  ensure();
-  fs.writeFileSync(FILE, JSON.stringify(db, null, 2));
+async function writeDB(db) {
+  const p = pool();
+  const safe = db && typeof db === "object" ? db : defaultDB();
+  safe.issued = Array.isArray(safe.issued) ? safe.issued : [];
+  safe.indexByCode = safe.indexByCode && typeof safe.indexByCode === "object" ? safe.indexByCode : {};
+
+  const q = `
+    INSERT INTO public.job_state (job_key, state_json, updated_at)
+    VALUES ($1, $2::jsonb, NOW())
+    ON CONFLICT (job_key)
+    DO UPDATE SET state_json = EXCLUDED.state_json, updated_at = NOW()
+  `;
+  await p.query(q, [JOB_KEY, JSON.stringify(safe)]);
+}
+
+// Optional best-effort lock to avoid duplicate issuance in multi-instance Railway
+async function withLock(fn, ttlSeconds = 20) {
+  const p = pool();
+  const lockBy = `${os.hostname()}:${process.pid}:${crypto.randomBytes(4).toString("hex")}`;
+
+  const q = `
+    INSERT INTO public.job_state (job_key, state_json, locked_until, locked_by, updated_at)
+    VALUES ($1, '{}'::jsonb, NOW() + ($2 || ' seconds')::interval, $3, NOW())
+    ON CONFLICT (job_key)
+    DO UPDATE SET
+      locked_until = CASE
+        WHEN public.job_state.locked_until IS NULL OR public.job_state.locked_until < NOW()
+        THEN NOW() + ($2 || ' seconds')::interval
+        ELSE public.job_state.locked_until
+      END,
+      locked_by = CASE
+        WHEN public.job_state.locked_until IS NULL OR public.job_state.locked_until < NOW()
+        THEN $3
+        ELSE public.job_state.locked_by
+      END,
+      updated_at = NOW()
+    RETURNING locked_by
+  `;
+
+  const { rows } = await p.query(q, [JOB_KEY, String(ttlSeconds), lockBy]);
+  const owner = rows?.[0]?.locked_by;
+
+  if (owner !== lockBy) {
+    return fn({ locked: false, lockBy });
+  }
+
+  try {
+    return await fn({ locked: true, lockBy });
+  } finally {
+    await p
+      .query(
+        `UPDATE public.job_state SET locked_until = NULL, locked_by = NULL, updated_at = NOW() WHERE job_key = $1 AND locked_by = $2`,
+        [JOB_KEY, lockBy]
+      )
+      .catch(() => null);
+  }
 }
 
 /**
@@ -37,8 +109,10 @@ function writeDB(db) {
  * - WINNER_TOP_REFERRER
  * - TOP10_SALES
  * - TOP10_REFERRALS
+ *
+ * NOTE: now async because Postgres
  */
-function recordCertificate({
+async function recordCertificate({
   monthKey,
   userId,
   username,
@@ -51,45 +125,53 @@ function recordCertificate({
 }) {
   if (!code) return;
 
-  const db = readDB();
   const normalized = String(code).trim().toUpperCase();
+  if (!normalized) return;
 
-  // If code already exists, do nothing (idempotent)
-  if (db.indexByCode?.[normalized]) return;
+  return withLock(async ({ locked }) => {
+    // If lock not acquired, avoid races; best-effort skip
+    if (!locked) return;
 
-  const entry = {
-    monthKey: String(monthKey || ""),
-    userId: String(userId || ""),
-    username: String(username || ""),
-    category: String(category || ""),
-    rankLabel: String(rankLabel || ""),
-    rewardLabel: String(rewardLabel || ""),
-    code: normalized,
-    filePath: filePath || null,
-    createdAt: Date.now(),
-    rewardClaimable: typeof rewardClaimable === "boolean" ? rewardClaimable : undefined,
-    claimed: false,
-    claimedAt: null,
-    claimedBy: null,
-  };
+    const db = await readDB();
 
-  db.issued = Array.isArray(db.issued) ? db.issued : [];
-  db.indexByCode = db.indexByCode || {};
+    // If code already exists, do nothing (idempotent)
+    if (db.indexByCode?.[normalized]) return;
 
-  db.issued.push(entry);
-  db.indexByCode[normalized] = entry;
+    const entry = {
+      monthKey: String(monthKey || ""),
+      userId: String(userId || ""),
+      username: String(username || ""),
+      category: String(category || ""),
+      rankLabel: String(rankLabel || ""),
+      rewardLabel: String(rewardLabel || ""),
+      code: normalized,
+      filePath: filePath || null,
+      createdAt: Date.now(),
+      rewardClaimable:
+        typeof rewardClaimable === "boolean" ? rewardClaimable : undefined,
+      claimed: false,
+      claimedAt: null,
+      claimedBy: null,
+    };
 
-  writeDB(db);
+    db.issued = Array.isArray(db.issued) ? db.issued : [];
+    db.indexByCode = db.indexByCode || {};
+
+    db.issued.push(entry);
+    db.indexByCode[normalized] = entry;
+
+    await writeDB(db);
+  });
 }
 
-function findCertificateByCode(code) {
-  const db = readDB();
+async function findCertificateByCode(code) {
+  const db = await readDB();
   const normalized = String(code || "").trim().toUpperCase();
   return db.indexByCode?.[normalized] || null;
 }
 
-function getUserCertificates(userId, monthKey = null) {
-  const db = readDB();
+async function getUserCertificates(userId, monthKey = null) {
+  const db = await readDB();
   const uid = String(userId || "");
   const list = Array.isArray(db.issued) ? db.issued : [];
   const filtered = list.filter((x) => x.userId === uid);
@@ -97,39 +179,45 @@ function getUserCertificates(userId, monthKey = null) {
   return filtered.filter((x) => x.monthKey === String(monthKey));
 }
 
-function claimCertificateByCode(code, userId) {
-  const db = readDB();
-
+async function claimCertificateByCode(code, userId) {
   const normalized = String(code || "").trim().toUpperCase();
   if (!normalized) return { ok: false, reason: "missing_code" };
 
-  const cert = db.indexByCode?.[normalized] || null;
-  if (!cert) return { ok: false, reason: "not_found" };
+  // claim modifies state → lock-protected
+  return withLock(async ({ locked }) => {
+    if (!locked) return { ok: false, reason: "busy_try_again" };
 
-  // Only the winner can claim their own certificate
-  if (String(cert.userId || "") !== String(userId || "")) {
-    return { ok: false, reason: "not_owner" };
-  }
+    const db = await readDB();
 
-  // If not claimable, block
-  const claimable =
-    typeof cert.rewardClaimable === "boolean"
-      ? cert.rewardClaimable
-      : String(cert.rewardLabel || "").trim().toLowerCase() !== "top 10 recognition";
+    const cert = db.indexByCode?.[normalized] || null;
+    if (!cert) return { ok: false, reason: "not_found" };
 
-  if (!claimable) return { ok: false, reason: "not_claimable" };
+    // Only the winner can claim their own certificate
+    if (String(cert.userId || "") !== String(userId || "")) {
+      return { ok: false, reason: "not_owner" };
+    }
 
-  // Already claimed
-  if (cert.claimed) return { ok: false, reason: "already_claimed" };
+    // If not claimable, block
+    const claimable =
+      typeof cert.rewardClaimable === "boolean"
+        ? cert.rewardClaimable
+        : String(cert.rewardLabel || "").trim().toLowerCase() !==
+          "top 10 recognition";
 
-  cert.claimed = true;
-  cert.claimedAt = Date.now();
-  cert.claimedBy = String(userId || "");
+    if (!claimable) return { ok: false, reason: "not_claimable" };
 
-  // Persist
-  writeDB(db);
+    // Already claimed
+    if (cert.claimed) return { ok: false, reason: "already_claimed" };
 
-  return { ok: true, cert };
+    cert.claimed = true;
+    cert.claimedAt = Date.now();
+    cert.claimedBy = String(userId || "");
+
+    // Persist
+    await writeDB(db);
+
+    return { ok: true, cert };
+  });
 }
 
 module.exports = {
