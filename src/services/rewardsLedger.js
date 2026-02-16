@@ -27,16 +27,21 @@ function defaultDB() {
   return { months: {} };
 }
 
+function normalizeDB(raw) {
+  const db = raw && typeof raw === "object" ? raw : {};
+  db.months = db.months && typeof db.months === "object" ? db.months : {};
+  return db;
+}
+
 async function readDB() {
   try {
     const p = pool();
-    const q = `SELECT state_json FROM public.job_state WHERE job_key = $1 LIMIT 1`;
+    // ✅ Prefer state_json, fallback to state for compatibility
+    const q = `SELECT state_json, state FROM public.job_state WHERE job_key = $1 LIMIT 1`;
     const { rows } = await p.query(q, [JOB_KEY]);
-    const raw = rows?.[0]?.state_json;
 
-    const db = raw && typeof raw === "object" ? raw : {};
-    db.months = db.months || {};
-    return db;
+    const raw = rows?.[0]?.state_json || rows?.[0]?.state || null;
+    return normalizeDB(raw);
   } catch {
     // Never crash callers; return safe defaults
     return defaultDB();
@@ -45,16 +50,20 @@ async function readDB() {
 
 async function writeDB(db) {
   const p = pool();
-  const safe = db && typeof db === "object" ? db : defaultDB();
-  safe.months = safe.months || {};
+  const safe = normalizeDB(db);
+  const json = JSON.stringify(safe);
 
+  // ✅ Write BOTH columns to keep system compatible
   const q = `
-    INSERT INTO public.job_state (job_key, state_json, updated_at)
-    VALUES ($1, $2::jsonb, NOW())
+    INSERT INTO public.job_state (job_key, state_json, state, updated_at)
+    VALUES ($1, $2::jsonb, $2::jsonb, NOW())
     ON CONFLICT (job_key)
-    DO UPDATE SET state_json = EXCLUDED.state_json, updated_at = NOW()
+    DO UPDATE SET
+      state_json = EXCLUDED.state_json,
+      state      = EXCLUDED.state,
+      updated_at = NOW()
   `;
-  await p.query(q, [JOB_KEY, JSON.stringify(safe)]);
+  await p.query(q, [JOB_KEY, json]);
 }
 
 // Optional best-effort lock to avoid double-writes (safe in multi-instance Railway)
@@ -63,8 +72,8 @@ async function withLock(fn, ttlSeconds = 20) {
   const lockBy = `${os.hostname()}:${process.pid}:${crypto.randomBytes(4).toString("hex")}`;
 
   const q = `
-    INSERT INTO public.job_state (job_key, state_json, locked_until, locked_by, updated_at)
-    VALUES ($1, '{}'::jsonb, NOW() + ($2 || ' seconds')::interval, $3, NOW())
+    INSERT INTO public.job_state (job_key, state_json, state, locked_until, locked_by, updated_at)
+    VALUES ($1, '{}'::jsonb, '{}'::jsonb, NOW() + ($2 || ' seconds')::interval, $3, NOW())
     ON CONFLICT (job_key)
     DO UPDATE SET
       locked_until = CASE
@@ -106,7 +115,7 @@ async function withLock(fn, ttlSeconds = 20) {
  * Structure:
  * months[monthKey] = { createdAt, winners: [{ userId, rank, reward, code, certPath, createdAt }] }
  *
- * NOTE: This is now async because Postgres.
+ * NOTE: This is async because Postgres.
  */
 async function saveMonthWinners(monthKey, winners) {
   if (!monthKey) return;

@@ -270,7 +270,7 @@ async function generateCertificatePNG({ username, userId, rank, reward, month, v
   // ---------- QR (never allowed to crash) ----------
   await drawQR(ctx, code);
 
-  // ---------- Save (TEMP) + Upload (Bucket) ----------
+  // ---------- Save (TEMP) + Upload (Bucket best-effort) ----------
   const stamp = Date.now();
   const fileName = `honors_${safeMonth}_${safeFileName(name)}_${safeFileName(uid)}_${stamp}.png`;
   const filePath = path.join(TMP_DIR, fileName);
@@ -280,16 +280,22 @@ async function generateCertificatePNG({ username, userId, rank, reward, month, v
   // TEMP write for Discord AttachmentBuilder(filePath) compatibility
   fs.writeFileSync(filePath, pngBuffer);
 
-  // Permanent upload to bucket (no /data)
-  const key = `certificates/${fileName}`;
-  const uploaded = await uploadPngToBucket({ key, buffer: pngBuffer });
-  const outPath = `s3://${uploaded.bucket}/${uploaded.key}`;
+  // Permanent upload to bucket (no /data) — BEST EFFORT (never crash ceremony)
+  let uploaded = null;
+  try {
+    const key = `certificates/${fileName}`;
+    uploaded = await uploadPngToBucket({ key, buffer: pngBuffer });
+  } catch (e) {
+    console.log("CERT_BUCKET_UPLOAD_FAIL:", e?.message || e);
+  }
+
+  const outPath = uploaded ? `s3://${uploaded.bucket}/${uploaded.key}` : null;
 
   return {
     filePath, // temp local path for immediate DM attachment
     verificationCode: code,
-    bucketKey: uploaded.key,
-    bucketName: uploaded.bucket,
+    bucketKey: uploaded?.key || null,
+    bucketName: uploaded?.bucket || null,
     outPath, // s3 locator (not assuming public)
   };
 }
