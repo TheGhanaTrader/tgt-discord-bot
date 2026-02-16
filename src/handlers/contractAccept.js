@@ -49,16 +49,86 @@ async function unlockAfterAcceptance(member) {
   }
 }
 
+/* -------------------- Bucket helpers (storage-only) -------------------- */
+
+function getS3Config() {
+  const endpoint = String(process.env.AWS_ENDPOINT_URL || "").trim();
+  const bucket = String(process.env.AWS_S3_BUCKET_NAME || "").trim();
+  const region = String(process.env.AWS_DEFAULT_REGION || "auto").trim();
+  const accessKeyId = String(process.env.AWS_ACCESS_KEY_ID || "").trim();
+  const secretAccessKey = String(process.env.AWS_SECRET_ACCESS_KEY || "").trim();
+
+  if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
+    throw new Error(
+      "Bucket env vars missing. Required: AWS_ENDPOINT_URL, AWS_S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (and AWS_DEFAULT_REGION optional)."
+    );
+  }
+
+  return { endpoint, bucket, region, accessKeyId, secretAccessKey };
+}
+
+async function streamToBuffer(stream) {
+  const chunks = [];
+  for await (const chunk of stream) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function downloadPdfFromBucketByKey(key) {
+  const { S3Client, GetObjectCommand } = require("@aws-sdk/client-s3");
+  const { endpoint, bucket, region, accessKeyId, secretAccessKey } = getS3Config();
+
+  const s3 = new S3Client({
+    region,
+    endpoint,
+    credentials: { accessKeyId, secretAccessKey },
+    forcePathStyle: true,
+  });
+
+  const res = await s3.send(
+    new GetObjectCommand({
+      Bucket: bucket,
+      Key: key,
+    })
+  );
+
+  if (!res || !res.Body) throw new Error("Bucket download failed (empty body)");
+  const buf = await streamToBuffer(res.Body);
+  if (!buf || !buf.length) throw new Error("Bucket download failed (empty buffer)");
+  return buf;
+}
+
+function parseS3Locator(outPath) {
+  // expects: s3://bucket/key...
+  const s = String(outPath || "").trim();
+  if (!s.startsWith("s3://")) return null;
+  const rest = s.slice("s3://".length);
+  const firstSlash = rest.indexOf("/");
+  if (firstSlash <= 0) return null;
+  const bucket = rest.slice(0, firstSlash);
+  const key = rest.slice(firstSlash + 1);
+  if (!bucket || !key) return null;
+  return { bucket, key };
+}
+
+/* -------------------- main handler -------------------- */
+
 async function handleContractAccept(interaction) {
   const member = interaction.member;
   const user = interaction.user;
 
   // ✅ HARD STOP: already accepted => NO new PDF, NO DM, NO log
-  if (hasAccepted(user.id)) {
-    return interaction.reply({
-      content: "✅ Contract already accepted. Access is already unlocked.",
-      ephemeral: true,
-    });
+  try {
+    const already = await hasAccepted(user.id);
+    if (already) {
+      return interaction.reply({
+        content: "✅ Contract already accepted. Access is already unlocked.",
+        ephemeral: true,
+      });
+    }
+  } catch {
+    // If ledger read fails, we still proceed cautiously; lock + record below will protect.
   }
 
   // ✅ LOCK (prevents double-click races)
@@ -74,18 +144,21 @@ async function handleContractAccept(interaction) {
     await interaction.deferReply({ ephemeral: true });
 
     // ✅ Re-check after defer (race safe)
-    if (hasAccepted(user.id)) {
-      interaction.client._locks.delete(key);
-      return interaction.editReply({
-        content: "✅ Contract already accepted. Access is already unlocked.",
-      });
-    }
+    try {
+      const already = await hasAccepted(user.id);
+      if (already) {
+        interaction.client._locks.delete(key);
+        return interaction.editReply({
+          content: "✅ Contract already accepted. Access is already unlocked.",
+        });
+      }
+    } catch {}
 
     const tier = detectTier(member);
     const acceptedAtUtc = new Date().toISOString().replace("T", " ").replace("Z", " UTC");
     const username = user.username;
 
-    // Generate PDF
+    // Generate PDF (now uploads to bucket)
     let pdf;
     try {
       pdf = await generatePersonalizedContractPdf({
@@ -101,13 +174,21 @@ async function handleContractAccept(interaction) {
       });
     }
 
-    // Record acceptance
-    const rec = recordAcceptance({
+    // Determine bucket key for download (prefer explicit bucketKey if present)
+    const locator = parseS3Locator(pdf?.outPath);
+    const bucketKey = pdf?.bucketKey || locator?.key || null;
+    if (!bucketKey) {
+      interaction.client._locks.delete(key);
+      return interaction.editReply("❌ Contract generated but bucket key missing. Check server logs.");
+    }
+
+    // Record acceptance (Postgres)
+    const rec = await recordAcceptance({
       userId: user.id,
       username,
       tier,
       acceptedAtUtc,
-      pdfPath: pdf.outPath,
+      pdfPath: pdf.outPath, // store locator string (s3://...)
     });
 
     if (!rec?.ok) {
@@ -151,13 +232,29 @@ async function handleContractAccept(interaction) {
       console.log("REF_JOIN_ON_CONTRACT_ERR:", e?.message || e);
     }
 
+    // Download the PDF from bucket once, reuse buffer for DM + log
+    let pdfBuffer = null;
+    try {
+      pdfBuffer = await downloadPdfFromBucketByKey(bucketKey);
+    } catch (e) {
+      console.log("CONTRACT_BUCKET_DOWNLOAD_FAIL:", e?.message || e);
+      // We do NOT fail acceptance if DM/log copy fails. Access still unlocks.
+    }
+
     // DM user (ONE copy only)
     try {
-      const userCopy = new AttachmentBuilder(pdf.outPath, { name: pdf.fileName });
-      await user.send({
-        content: "✅ Contract accepted. Here is your personalized signed copy.\nProject: The Ghana Trader Desk",
-        files: [userCopy],
-      });
+      if (pdfBuffer) {
+        const userCopy = new AttachmentBuilder(pdfBuffer, { name: pdf.fileName });
+        await user.send({
+          content: "✅ Contract accepted. Here is your personalized signed copy.\nProject: The Ghana Trader Desk",
+          files: [userCopy],
+        });
+      } else {
+        await user.send({
+          content:
+            "✅ Contract accepted. Your signed copy was generated and stored securely.\nProject: The Ghana Trader Desk",
+        });
+      }
     } catch {}
 
     // Log to private channel (ONE embed + ONE file)
@@ -179,10 +276,14 @@ async function handleContractAccept(interaction) {
             ].join("\n")
           );
 
-        const tgtCopy = new AttachmentBuilder(pdf.outPath, { name: pdf.fileName });
-
         await logChannel.send({ embeds: [embed] }).catch(() => {});
-        await logChannel.send({ files: [tgtCopy] }).catch(() => {});
+
+        try {
+          if (pdfBuffer) {
+            const tgtCopy = new AttachmentBuilder(pdfBuffer, { name: pdf.fileName });
+            await logChannel.send({ files: [tgtCopy] }).catch(() => {});
+          }
+        } catch {}
       }
     }
 
