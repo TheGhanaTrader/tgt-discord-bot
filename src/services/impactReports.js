@@ -1,27 +1,91 @@
 // src/services/impactReports.js
 "use strict";
 
-const fs = require("fs");
-const path = require("path");
+const os = require("os");
+const crypto = require("crypto");
+const { Pool } = require("pg");
 const { EmbedBuilder } = require("discord.js");
 
-const DATA_DIR = path.join(process.cwd(), "data");
+// job_state keys (temporary ledgers until we standardize tables)
+const LOSS_JOB_KEY = "prop_losses_ledger";
+const DENIAL_JOB_KEY = "prop_denials_ledger";
 
-// Future-proof ledgers (we’ll build these later). For now, safe defaults (0).
-const FUNDED_LEDGER = path.join(DATA_DIR, "prop_funded.json");
-const PAYOUT_LEDGER = path.join(DATA_DIR, "prop_payouts.json");
-const LOSS_LEDGER = path.join(DATA_DIR, "prop_losses.json");
-const DENIAL_LEDGER = path.join(DATA_DIR, "prop_denials.json");
+let _pool = null;
 
-function safeReadJSON(file, fallback) {
+function pool() {
+  if (_pool) return _pool;
+
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error("DATABASE_URL is required (impact reports read Postgres)");
+
+  _pool = new Pool({
+    connectionString: url,
+    ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
+  });
+
+  return _pool;
+}
+
+async function readJobState(jobKey, fallback) {
   try {
-    if (!fs.existsSync(file)) return fallback;
-    const raw = fs.readFileSync(file, "utf8");
-    if (!raw) return fallback;
-    const parsed = JSON.parse(raw);
-    return parsed ?? fallback;
+    const p = pool();
+    const q = `SELECT state_json FROM public.job_state WHERE job_key = $1 LIMIT 1`;
+    const { rows } = await p.query(q, [jobKey]);
+    const raw = rows?.[0]?.state_json;
+    return raw ?? fallback;
   } catch {
     return fallback;
+  }
+}
+
+async function writeJobState(jobKey, stateObj) {
+  const p = pool();
+  const q = `
+    INSERT INTO public.job_state (job_key, state_json, updated_at)
+    VALUES ($1, $2::jsonb, NOW())
+    ON CONFLICT (job_key)
+    DO UPDATE SET state_json = EXCLUDED.state_json, updated_at = NOW()
+  `;
+  await p.query(q, [jobKey, JSON.stringify(stateObj || {})]);
+}
+
+// Best-effort lock (protect pointer-like ledgers if needed later)
+async function withLock(jobKey, fn, ttlSeconds = 10) {
+  const p = pool();
+  const lockBy = `${os.hostname()}:${process.pid}:${crypto.randomBytes(4).toString("hex")}`;
+
+  const q = `
+    INSERT INTO public.job_state (job_key, state_json, locked_until, locked_by, updated_at)
+    VALUES ($1, '{}'::jsonb, NOW() + ($2 || ' seconds')::interval, $3, NOW())
+    ON CONFLICT (job_key)
+    DO UPDATE SET
+      locked_until = CASE
+        WHEN public.job_state.locked_until IS NULL OR public.job_state.locked_until < NOW()
+        THEN NOW() + ($2 || ' seconds')::interval
+        ELSE public.job_state.locked_until
+      END,
+      locked_by = CASE
+        WHEN public.job_state.locked_until IS NULL OR public.job_state.locked_until < NOW()
+        THEN $3
+        ELSE public.job_state.locked_by
+      END,
+      updated_at = NOW()
+    RETURNING locked_by
+  `;
+  const { rows } = await p.query(q, [jobKey, String(ttlSeconds), lockBy]);
+  const owner = rows?.[0]?.locked_by;
+
+  if (owner !== lockBy) return fn({ locked: false, lockBy });
+
+  try {
+    return await fn({ locked: true, lockBy });
+  } finally {
+    await p
+      .query(
+        `UPDATE public.job_state SET locked_until = NULL, locked_by = NULL, updated_at = NOW() WHERE job_key = $1 AND locked_by = $2`,
+        [jobKey, lockBy]
+      )
+      .catch(() => null);
   }
 }
 
@@ -74,19 +138,68 @@ function countWhere(items, predicate) {
 
 /**
  * Ledger shapes we will standardize later:
- * - funded: [{ userId, firm, accountSize, monthKey, yearKey, status: "live"|"lost", ts }]
- * - payouts: [{ userId, firm, payoutAmount, monthKey, yearKey, statusAfter: "still_funded"|"lost_after", ts }]
- * - losses: [{ userId, firm, accountSizeLost, monthKey, yearKey, reason, lessons, ts }]
- * - denials: [{ userId, firm, payoutAmountRequested, monthKey, yearKey, reason, ts }]
+ * - funded (DB): prop_funded rows (account_size, month_key, year_key, status)
+ * - payouts (DB): prop_payouts rows (payout_amount, month_key, year_key)
+ * - losses (job_state for now): [{ userId, firm, accountSizeLost, monthKey, yearKey, reason, lessons, ts }]
+ * - denials (job_state for now): [{ userId, firm, payoutAmountRequested, monthKey, yearKey, reason, ts }]
  */
 
-function computeCapitalStats() {
+async function fetchFundedRows() {
+  const p = pool();
+  const q = `
+    SELECT user_id, firm, account_size, status, month_key, year_key
+    FROM public.prop_funded
+  `;
+  const { rows } = await p.query(q);
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function fetchPayoutRows() {
+  const p = pool();
+  const q = `
+    SELECT user_id, firm, payout_amount, status_after, month_key, year_key
+    FROM public.prop_payouts
+  `;
+  const { rows } = await p.query(q);
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function fetchLossRows() {
+  const st = await readJobState(LOSS_JOB_KEY, []);
+  return Array.isArray(st) ? st : [];
+}
+
+async function fetchDenialRows() {
+  const st = await readJobState(DENIAL_JOB_KEY, []);
+  return Array.isArray(st) ? st : [];
+}
+
+async function computeCapitalStats() {
   const now = Date.now();
   const mk = monthKeyUTC(now);
   const yk = yearKeyUTC(now);
 
-  const funded = safeReadJSON(FUNDED_LEDGER, []);
-  const payouts = safeReadJSON(PAYOUT_LEDGER, []);
+  const fundedRows = await fetchFundedRows();
+  const payoutRows = await fetchPayoutRows();
+
+  // Map DB snake_case into the keys your existing math expects (no intent change)
+  const funded = fundedRows.map((x) => ({
+    userId: x.user_id,
+    firm: x.firm,
+    accountSize: Number(x.account_size || 0),
+    status: x.status,
+    monthKey: x.month_key,
+    yearKey: x.year_key,
+  }));
+
+  const payouts = payoutRows.map((x) => ({
+    userId: x.user_id,
+    firm: x.firm,
+    payoutAmount: Number(x.payout_amount || 0),
+    statusAfter: x.status_after,
+    monthKey: x.month_key,
+    yearKey: x.year_key,
+  }));
 
   const fundedPrevMonthTotal = sumWhere(funded, (x) => x?.monthKey === mk, "accountSize"); // NOTE: until we add true "prev month", this reports current month safely.
   const fundedYTD = sumWhere(funded, (x) => x?.yearKey === yk, "accountSize");
@@ -96,8 +209,15 @@ function computeCapitalStats() {
   const payoutsYTD = sumWhere(payouts, (x) => x?.yearKey === yk, "payoutAmount");
   const payoutsAll = sumWhere(payouts, () => true, "payoutAmount");
 
-  const liveCapital = sumWhere(funded, (x) => String(x?.status || "").toLowerCase() === "live", "accountSize");
-  const liveAccounts = countWhere(funded, (x) => String(x?.status || "").toLowerCase() === "live");
+  const liveCapital = sumWhere(
+    funded,
+    (x) => String(x?.status || "").toLowerCase() === "live",
+    "accountSize"
+  );
+  const liveAccounts = countWhere(
+    funded,
+    (x) => String(x?.status || "").toLowerCase() === "live"
+  );
 
   return {
     monthKey: mk,
@@ -113,13 +233,13 @@ function computeCapitalStats() {
   };
 }
 
-function computeRiskStats() {
+async function computeRiskStats() {
   const now = Date.now();
   const mk = monthKeyUTC(now);
   const yk = yearKeyUTC(now);
 
-  const losses = safeReadJSON(LOSS_LEDGER, []);
-  const denials = safeReadJSON(DENIAL_LEDGER, []);
+  const losses = await fetchLossRows();
+  const denials = await fetchDenialRows();
 
   const lostAccounts = countWhere(losses, (x) => x?.monthKey === mk);
   const lostCapital = sumWhere(losses, (x) => x?.monthKey === mk, "accountSizeLost");
@@ -236,7 +356,7 @@ async function postCapitalPerformanceReport(client) {
   const annId = String(process.env.ANNOUNCEMENTS_CHANNEL_ID || "").trim();
   const genId = String(process.env.GENERAL_CHANNEL_ID || "").trim();
 
-  const stats = computeCapitalStats();
+  const stats = await computeCapitalStats();
   const embed = buildCapitalPerformanceEmbed(stats);
 
   const ann =
@@ -259,7 +379,7 @@ async function postRiskSnapshotReport(client) {
   const riskId = String(process.env.RISK_INSIGHTS_CHANNEL_ID || "").trim();
   const genId = String(process.env.GENERAL_CHANNEL_ID || "").trim();
 
-  const stats = computeRiskStats();
+  const stats = await computeRiskStats();
   const embed = buildRiskSnapshotEmbed(stats);
 
   const risk =
@@ -287,4 +407,13 @@ module.exports = {
   buildRiskSnapshotEmbed,
   computeCapitalStats,
   computeRiskStats,
+
+  // reserved helpers for when loss/denial logging goes live
+  _internal: {
+    readJobState,
+    writeJobState,
+    withLock,
+    LOSS_JOB_KEY,
+    DENIAL_JOB_KEY,
+  },
 };
