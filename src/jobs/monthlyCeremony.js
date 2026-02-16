@@ -53,14 +53,19 @@ function safeUsernameFromGuild(guild, userId) {
   }
 }
 
-function alreadyIssuedFor({ userId, monthKey, category, rankLabel }) {
-  const certs = getUserCertificates(String(userId), String(monthKey)) || [];
-  return certs.some((c) => c.monthKey === String(monthKey) && c.category === category && c.rankLabel === rankLabel);
+async function alreadyIssuedFor({ userId, monthKey, category, rankLabel }) {
+  const certs = (await getUserCertificates(String(userId), String(monthKey))) || [];
+  return certs.some(
+    (c) =>
+      c.monthKey === String(monthKey) &&
+      c.category === category &&
+      c.rankLabel === rankLabel
+  );
 }
 
 async function dmCertificate(client, userId, monthKey, rankLabel, code, filePath, dryRun) {
   console.log("CERT_DM_DEBUG:", { userId, dryRun });
-  
+
   if (dryRun) return true;
   try {
     const user = await client.users.fetch(userId).catch(() => null);
@@ -94,12 +99,47 @@ async function dmCertificate(client, userId, monthKey, rankLabel, code, filePath
 /* -------------------- rewards -------------------- */
 
 function rewardByRevenue(totalRevenue) {
-  if (totalRevenue >= 65000) return { first: "100K Funded Account", second: "50K Funded Account", referral: "25K Funded Account" };
-  if (totalRevenue >= 50000) return { first: "100K Funded Account", second: "50K Funded Account", referral: null, referralRoleId: ROLE_GOLD_ID };
-  if (totalRevenue >= 37000) return { first: "50K Funded Account", second: "25K Funded Account", referral: "10K Funded Account", referralRoleId: ROLE_GOLD_ID };
-  if (totalRevenue >= 27000) return { first: "50K Funded Account", second: "25K Funded Account", referral: null, referralRoleId: ROLE_GOLD_ID };
-  if (totalRevenue >= 20000) return { first: "25K Funded Account", second: "10K Funded Account", referral: null, referralRoleId: ROLE_SILVER_ID };
-  if (totalRevenue >= 15000) return { first: "25K Funded Account", second: null, referral: null, referralRoleId: ROLE_SILVER_ID };
+  if (totalRevenue >= 65000)
+    return {
+      first: "100K Funded Account",
+      second: "50K Funded Account",
+      referral: "25K Funded Account",
+    };
+  if (totalRevenue >= 50000)
+    return {
+      first: "100K Funded Account",
+      second: "50K Funded Account",
+      referral: null,
+      referralRoleId: ROLE_GOLD_ID,
+    };
+  if (totalRevenue >= 37000)
+    return {
+      first: "50K Funded Account",
+      second: "25K Funded Account",
+      referral: "10K Funded Account",
+      referralRoleId: ROLE_GOLD_ID,
+    };
+  if (totalRevenue >= 27000)
+    return {
+      first: "50K Funded Account",
+      second: "25K Funded Account",
+      referral: null,
+      referralRoleId: ROLE_GOLD_ID,
+    };
+  if (totalRevenue >= 20000)
+    return {
+      first: "25K Funded Account",
+      second: "10K Funded Account",
+      referral: null,
+      referralRoleId: ROLE_SILVER_ID,
+    };
+  if (totalRevenue >= 15000)
+    return {
+      first: "25K Funded Account",
+      second: null,
+      referral: null,
+      referralRoleId: ROLE_SILVER_ID,
+    };
   return { first: null, second: null, referral: null };
 }
 
@@ -111,8 +151,12 @@ function buildHallOfFameEmbed({ monthKey, top3Sales, top3Referrals }) {
     .setTitle("🏛️ TGT Hall of Fame — Monthly Top 3")
     .setDescription(
       `Cycle: **${monthKey}**\n\n` +
-        `**Top 3 — Sales**\n${top3Sales.map((x) => `${medal(x.rank)} <@${x.userId}>`).join("\n") || "—"}\n\n` +
-        `**Top 3 — Referrals**\n${top3Referrals.map((x) => `${medal(x.rank)} <@${x.userId}>`).join("\n") || "—"}`
+        `**Top 3 — Sales**\n${
+          top3Sales.map((x) => `${medal(x.rank)} <@${x.userId}>`).join("\n") || "—"
+        }\n\n` +
+        `**Top 3 — Referrals**\n${
+          top3Referrals.map((x) => `${medal(x.rank)} <@${x.userId}>`).join("\n") || "—"
+        }`
     )
     .setFooter({ text: "The Ghana Trader • Prestige. Proof. Performance." })
     .setColor(0xC9A24D);
@@ -122,7 +166,9 @@ function buildPrestigeWinnersEmbed({ monthKey, winners }) {
   const hasWinners = winners.length > 0;
 
   const body = hasWinners
-    ? winners.map((w) => `• <@${w.userId}> — **${w.rank}**\n  Reward: **${w.reward}**`).join("\n\n")
+    ? winners
+        .map((w) => `• <@${w.userId}> — **${w.rank}**\n  Reward: **${w.reward}**`)
+        .join("\n\n")
     : "No winners for this cycle.";
 
   const note = hasWinners
@@ -165,15 +211,15 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
 
   if (bySales[0] && rewards.first) {
     winners.push({ userId: bySales[0][0], rank: "🥇 Top Sales", reward: rewards.first });
-    if (!dryRun) enqueue({ monthKey, userId: bySales[0][0], reward: rewards.first });
+    if (!dryRun) await enqueue({ monthKey, userId: bySales[0][0], reward: rewards.first });
   }
 
   if (byJoins[0] && rewards.referral) {
     winners.push({ userId: byJoins[0][0], rank: "🎖 Top Referrer", reward: rewards.referral });
-    if (!dryRun) enqueue({ monthKey, userId: byJoins[0][0], reward: rewards.referral });
+    if (!dryRun) await enqueue({ monthKey, userId: byJoins[0][0], reward: rewards.referral });
   }
 
-  if (!dryRun) saveMonthWinners(monthKey, winners);
+  if (!dryRun) await saveMonthWinners(monthKey, winners);
 
   const top3Sales = topNFromSorted(bySales, 3);
   const top3Referrals = topNFromSorted(byJoins, 3);
@@ -188,7 +234,7 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
     const rankLabel = `Top 10 Sales — Rank ${t.rank}`;
     const category = "TOP10_SALES";
 
-   // if (alreadyIssuedFor({ userId: t.userId, monthKey, category, rankLabel })) continue;
+    // if (await alreadyIssuedFor({ userId: t.userId, monthKey, category, rankLabel })) continue;
 
     const username = safeUsernameFromGuild(guild, t.userId);
     const code = genVerificationCode16();
@@ -206,7 +252,7 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
     const finalCode = cert?.verificationCode || code;
     if (!filePath) continue;
 
-    const entry = recordCertificate({
+    await recordCertificate({
       monthKey,
       userId: t.userId,
       username,
@@ -225,7 +271,7 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
     const rankLabel = `Top 10 Referrals — Rank ${t.rank}`;
     const category = "TOP10_REFERRALS";
 
-   // if (alreadyIssuedFor({ userId: t.userId, monthKey, category, rankLabel })) continue;
+    // if (await alreadyIssuedFor({ userId: t.userId, monthKey, category, rankLabel })) continue;
 
     const username = safeUsernameFromGuild(guild, t.userId);
     const code = genVerificationCode16();
@@ -243,7 +289,7 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
     const finalCode = cert?.verificationCode || code;
     if (!filePath) continue;
 
-    const entry = recordCertificate({
+    await recordCertificate({
       monthKey,
       userId: t.userId,
       username,
@@ -263,7 +309,7 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
   const baseEmbed = buildPrestigeWinnersEmbed({ monthKey, winners });
 
   let honorsEmbed = baseEmbed;
-  const sponsor = pickNextSponsor();
+  const sponsor = await pickNextSponsor();
   if (sponsor) {
     const sponsorLine = formatSponsorLine(sponsor);
     honorsEmbed = EmbedBuilder.from(baseEmbed).setFooter({ text: sponsorLine });
