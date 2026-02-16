@@ -1,11 +1,8 @@
+// src/commands/public/admin/resetleaderboards.js
 "use strict";
 
 const { SlashCommandBuilder } = require("discord.js");
-const fs = require("fs");
-const path = require("path");
-
-const DATA_DIR = path.join(process.cwd(), "data");
-const FILE = path.join(DATA_DIR, "leaderboards.json");
+const { resetLeaderboardsState } = require("../../../services/leaderboards");
 
 async function purgeLeaderboardChannel(client, channelId) {
   if (!channelId) return { ok: false, reason: "missing_channel_id" };
@@ -21,7 +18,8 @@ async function purgeLeaderboardChannel(client, channelId) {
     const isBot = m?.author?.bot;
     const title = m?.embeds?.[0]?.title || "";
     const isLeaderboard =
-      title.includes("Referral Leaderboard") || title.includes("Affiliate Sales Leaderboard");
+      title.includes("Referral Leaderboard") ||
+      title.includes("Affiliate Sales Leaderboard");
 
     if (isBot && isLeaderboard) {
       await m.unpin().catch(() => null);
@@ -36,7 +34,8 @@ async function purgeLeaderboardChannel(client, channelId) {
       const isBot = m?.author?.bot;
       const title = m?.embeds?.[0]?.title || "";
       const isLeaderboard =
-        title.includes("Referral Leaderboard") || title.includes("Affiliate Sales Leaderboard");
+        title.includes("Referral Leaderboard") ||
+        title.includes("Affiliate Sales Leaderboard");
 
       if (isBot && isLeaderboard) {
         await m.delete().catch(() => null);
@@ -65,13 +64,12 @@ module.exports = {
     await purgeLeaderboardChannel(interaction.client, refId).catch(() => null);
     await purgeLeaderboardChannel(interaction.client, affId).catch(() => null);
 
-    // 2) Clear saved state
-    try {
-      if (fs.existsSync(FILE)) fs.unlinkSync(FILE);
-    } catch {}
+    // 2) Clear saved state (Postgres job_state, NO /data)
+    await resetLeaderboardsState().catch(() => null);
 
     return interaction.editReply({
-      content: "✅ Done. Old leaderboard messages deleted + state cleared. Bot will rebuild a single clean pinned dashboard.",
+      content:
+        "✅ Done. Old leaderboard messages deleted + state cleared. Bot will rebuild a single clean pinned dashboard.",
     });
   },
 };
