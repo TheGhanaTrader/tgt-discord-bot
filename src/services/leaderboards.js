@@ -1,72 +1,22 @@
 // src/services/leaderboards.js
 "use strict";
 
-const fs = require("fs");
-const path = require("path");
 const { EmbedBuilder } = require("discord.js");
 const referrals = require("./referrals");
+const { getJob, setState } = require("../utils/schedulerState");
 
 // Marker to reliably identify our dashboard embeds (safe + minimal)
 const LEADERBOARD_PIN_MARKER = "TGT_LEADERBOARD_PIN";
 
-function nowMs() {
-  const v = Number(process.env.TGT_NOW_MS);
-  return Number.isFinite(v) && v > 0 ? v : Date.now();
-}
-
-const DATA_DIR = path.join(process.cwd(), "data");
-const FILE = path.join(DATA_DIR, "leaderboards.json");
-
 // 7 days
 const ARCHIVE_AFTER_MS = 7 * 24 * 60 * 60 * 1000;
 
-function ensure() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(FILE)) {
-    fs.writeFileSync(
-      FILE,
-      JSON.stringify(
-        {
-          referral: { messageId: null, prevMessageId: null, prevMonthKey: null },
-          affiliate: { messageId: null, prevMessageId: null, prevMonthKey: null },
-          currentMonthKey: null,
-          rolloverAtMs: null,
-          archived: {},
-        },
-        null,
-        2
-      )
-    );
-  }
-}
+// DB key for job_state
+const JOB_KEY = "leaderboards_state";
 
-function readDB() {
-  ensure();
-  try {
-    const raw = fs.readFileSync(FILE, "utf8");
-    const db = raw ? JSON.parse(raw) : {};
-    db.referral = db.referral || { messageId: null, prevMessageId: null, prevMonthKey: null };
-    db.affiliate = db.affiliate || { messageId: null, prevMessageId: null, prevMonthKey: null };
-    db.archived = db.archived || {};
-    db.currentMonthKey = db.currentMonthKey || null;
-    db.rolloverAtMs = db.rolloverAtMs || null;
-    return db;
-  } catch {
-    const safe = {
-      referral: { messageId: null, prevMessageId: null, prevMonthKey: null },
-      affiliate: { messageId: null, prevMessageId: null, prevMonthKey: null },
-      currentMonthKey: null,
-      rolloverAtMs: null,
-      archived: {},
-    };
-    fs.writeFileSync(FILE, JSON.stringify(safe, null, 2));
-    return safe;
-  }
-}
-
-function writeDB(db) {
-  ensure();
-  fs.writeFileSync(FILE, JSON.stringify(db, null, 2));
+function nowMs() {
+  const v = Number(process.env.TGT_NOW_MS);
+  return Number.isFinite(v) && v > 0 ? v : Date.now();
 }
 
 function nowUnix() {
@@ -108,7 +58,6 @@ function buildReferralEmbed({ monthKey, rows }) {
       { name: "Cycle (UTC)", value: monthKey, inline: true },
       { name: "Updated", value: `<t:${updated}:R>`, inline: true }
     )
-    // ✅ Add marker so we can reliably reuse the pinned message after Railway deploys
     .setFooter({
       text: `The Ghana Trader Desk • Referrals count only after contract acceptance. • ${LEADERBOARD_PIN_MARKER}`,
     })
@@ -131,21 +80,50 @@ function buildAffiliateEmbed({ monthKey, rows }) {
       { name: "Cycle (UTC)", value: monthKey, inline: true },
       { name: "Updated", value: `<t:${updated}:R>`, inline: true }
     )
-    // ✅ Add marker so we can reliably reuse the pinned message after Railway deploys
     .setFooter({
       text: `The Ghana Trader Desk • Only first paid conversion counts. • ${LEADERBOARD_PIN_MARKER}`,
     })
     .setColor(0xc9a24d);
 }
 
+// -------------------- DB State Helpers --------------------
+
+function defaultState() {
+  return {
+    referral: { messageId: null, prevMessageId: null, prevMonthKey: null },
+    affiliate: { messageId: null, prevMessageId: null, prevMonthKey: null },
+    currentMonthKey: null,
+    rolloverAtMs: null,
+    archived: {},
+  };
+}
+
+async function readState() {
+  const row = await getJob(JOB_KEY);
+  const s = row?.state && typeof row.state === "object" ? row.state : {};
+  return {
+    ...defaultState(),
+    ...s,
+    referral: { ...defaultState().referral, ...(s.referral || {}) },
+    affiliate: { ...defaultState().affiliate, ...(s.affiliate || {}) },
+    archived: s.archived && typeof s.archived === "object" ? s.archived : {},
+  };
+}
+
+async function writeState(next) {
+  const safe = next && typeof next === "object" ? next : defaultState();
+  await setState(JOB_KEY, safe);
+}
+
+// -------------------- Discord Helpers --------------------
+
 // ✅ Find existing pinned dashboard message (reuses after Railway deploy)
-// - Keeps oldest match
-// - Unpins any newer duplicates (self-clean)
+// - Keeps newest match (and unpins older duplicates)
 async function findPinnedDashboardMessage(channel, wantTitle) {
   const pins = await channel.messages.fetchPinned().catch(() => null);
   if (!pins) return null;
 
-  // First pass: strict match (title + marker)
+  // strict match (title + marker)
   const strict = pins
     .filter((p) => {
       if (!p.author?.bot) return false;
@@ -158,7 +136,7 @@ async function findPinnedDashboardMessage(channel, wantTitle) {
 
   let keeper = strict.first() || null;
 
-  // Fallback: title-only (for legacy pins created before marker existed)
+  // fallback: title-only (legacy pins before marker existed)
   if (!keeper) {
     const legacy = pins
       .filter((p) => {
@@ -173,12 +151,14 @@ async function findPinnedDashboardMessage(channel, wantTitle) {
 
   if (!keeper) return null;
 
-  // Unpin other dashboard pins for this title (keeps the channel clean)
+  // Unpin other dashboard pins for this title
   for (const p of pins.values()) {
     if (p.id === keeper.id) continue;
     const title = p.embeds?.[0]?.title || "";
     if (title !== wantTitle) continue;
-    try { await p.unpin(); } catch {}
+    try {
+      await p.unpin();
+    } catch {}
   }
 
   return keeper;
@@ -192,7 +172,7 @@ async function fetchOrCreateDashboardMessage(channel, savedMessageId, fallbackTe
     if (byId) return byId;
   }
 
-  // 2) Try pinned dashboard (marker + title)
+  // 2) Try pinned dashboard
   const pinned = await findPinnedDashboardMessage(channel, wantTitle).catch(() => null);
   if (pinned) return pinned;
 
@@ -202,8 +182,8 @@ async function fetchOrCreateDashboardMessage(channel, savedMessageId, fallbackTe
 
 async function ensurePinned(channel, msg) {
   if (!msg) return;
-  const pinned = await channel.messages.fetchPinned().catch(() => null);
-  const isPinned = pinned?.some((p) => p.id === msg.id);
+  const pins = await channel.messages.fetchPinned().catch(() => null);
+  const isPinned = pins?.some((p) => p.id === msg.id);
   if (!isPinned) {
     await msg.pin().catch(() => null);
   }
@@ -223,12 +203,12 @@ async function safeDelete(channel, msgId) {
   await m.delete().catch(() => null);
 }
 
-async function upsertPinnedEmbed(channel, kind /* "referral" | "affiliate" */, embed, db) {
-  const savedId = db?.[kind]?.messageId || null;
+async function upsertPinnedEmbed(channel, kind /* "referral" | "affiliate" */, embed, state) {
+  const savedId = state?.[kind]?.messageId || null;
   const wantTitle = kind === "referral" ? "🏁 Referral Leaderboard" : "💎 Affiliate Sales Leaderboard";
 
-  // ✅ Critical fix: reuse pinned message if Railway lost saved messageId
-  let msg = await fetchOrCreateDashboardMessage(
+  // Reuse pinned message if Railway lost messageId
+  const msg = await fetchOrCreateDashboardMessage(
     channel,
     savedId,
     "⏳ Building leaderboard dashboard…",
@@ -240,21 +220,21 @@ async function upsertPinnedEmbed(channel, kind /* "referral" | "affiliate" */, e
   await msg.edit({ content: "", embeds: [embed] }).catch(() => null);
   await ensurePinned(channel, msg);
 
-  db[kind] = db[kind] || {};
-  db[kind].messageId = msg.id;
-  writeDB(db);
+  state[kind] = state[kind] || {};
+  state[kind].messageId = msg.id;
+  await writeState(state);
 
   return { ok: true, messageId: msg.id };
 }
 
 /**
  * Archive previous month dashboards AFTER 7 DAYS:
- * - Repost the previous dashboard message content to archive channel (as an embed copy)
- * - Unpin + delete the previous message from main dashboard channel
+ * - If archive channels exist: repost embed copy to archive channel
+ * - Unpin + delete the previous message from main channel
  * Result: main stays "prestige-clean" with ONLY current month.
  */
-async function archiveIfDue(client, db) {
-  const rolloverAt = Number(db.rolloverAtMs || 0);
+async function archiveIfDue(client, state) {
+  const rolloverAt = Number(state.rolloverAtMs || 0);
   if (!rolloverAt) return;
 
   const age = nowMs() - rolloverAt;
@@ -265,7 +245,6 @@ async function archiveIfDue(client, db) {
   const refArchiveId = String(process.env.REF_LEADERBOARD_ARCHIVE_CHANNEL_ID || "").trim();
   const affArchiveId = String(process.env.AFF_LEADERBOARD_ARCHIVE_CHANNEL_ID || "").trim();
 
-  // If archive channels not configured, we still clean main after 7 days (optional safety).
   const refMain =
     refMainId && (client.channels.cache.get(refMainId) || (await client.channels.fetch(refMainId).catch(() => null)));
   const affMain =
@@ -280,57 +259,58 @@ async function archiveIfDue(client, db) {
 
   // Referral archive
   try {
-    const prevId = db.referral?.prevMessageId;
-    const prevMonth = db.referral?.prevMonthKey;
+    const prevId = state.referral?.prevMessageId;
+    const prevMonth = state.referral?.prevMonthKey;
     if (refMain && prevId && prevMonth) {
       const prevMsg = await refMain.messages.fetch(prevId).catch(() => null);
       if (prevMsg?.embeds?.[0] && refArchive && refArchive.isTextBased()) {
-        // repost embed copy to archive channel
         await refArchive.send({ embeds: [prevMsg.embeds[0]] }).catch(() => null);
-        db.archived[`ref-${prevMonth}`] = { archivedAt: Date.now(), from: prevId };
+        state.archived[`ref-${prevMonth}`] = { archivedAt: Date.now(), from: prevId };
       } else {
-        db.archived[`ref-${prevMonth}`] = { archivedAt: Date.now(), note: "no_source_message_or_no_archive_channel" };
+        state.archived[`ref-${prevMonth}`] = { archivedAt: Date.now(), note: "no_source_or_no_archive_channel" };
       }
 
-      // clean main
       await safeUnpin(refMain, prevId);
       await safeDelete(refMain, prevId);
 
-      db.referral.prevMessageId = null;
-      db.referral.prevMonthKey = null;
+      state.referral.prevMessageId = null;
+      state.referral.prevMonthKey = null;
     }
   } catch {}
 
   // Affiliate archive
   try {
-    const prevId = db.affiliate?.prevMessageId;
-    const prevMonth = db.affiliate?.prevMonthKey;
+    const prevId = state.affiliate?.prevMessageId;
+    const prevMonth = state.affiliate?.prevMonthKey;
     if (affMain && prevId && prevMonth) {
       const prevMsg = await affMain.messages.fetch(prevId).catch(() => null);
       if (prevMsg?.embeds?.[0] && affArchive && affArchive.isTextBased()) {
         await affArchive.send({ embeds: [prevMsg.embeds[0]] }).catch(() => null);
-        db.archived[`aff-${prevMonth}`] = { archivedAt: Date.now(), from: prevId };
+        state.archived[`aff-${prevMonth}`] = { archivedAt: Date.now(), from: prevId };
       } else {
-        db.archived[`aff-${prevMonth}`] = { archivedAt: Date.now(), note: "no_source_message_or_no_archive_channel" };
+        state.archived[`aff-${prevMonth}`] = { archivedAt: Date.now(), note: "no_source_or_no_archive_channel" };
       }
 
       await safeUnpin(affMain, prevId);
       await safeDelete(affMain, prevId);
 
-      db.affiliate.prevMessageId = null;
-      db.affiliate.prevMonthKey = null;
+      state.affiliate.prevMessageId = null;
+      state.affiliate.prevMonthKey = null;
     }
   } catch {}
 
-  // After archiving, reset rollover marker so we don’t repeat.
-  db.rolloverAtMs = null;
-  writeDB(db);
+  // Reset rollover marker so we don’t repeat
+  state.rolloverAtMs = null;
+  await writeState(state);
 
   console.log("✅ LEADERBOARDS_ARCHIVED_AND_CLEANED_MAIN");
 }
 
+// -------------------- Public API --------------------
+
 async function refreshLeaderboards(client) {
-    console.log("TGT_LB_TICK");
+  console.log("TGT_LB_TICK");
+
   const refChanId = String(process.env.REF_LEADERBOARD_CHANNEL_ID || "").trim();
   const affChanId = String(process.env.AFF_LEADERBOARD_CHANNEL_ID || "").trim();
   if (!refChanId || !affChanId) {
@@ -338,38 +318,35 @@ async function refreshLeaderboards(client) {
     return { ok: false, reason: "missing_channel_ids" };
   }
 
-  const db = readDB();
+  const state = await readState();
   const monthKey = monthKeyUTC(nowMs());
 
   // Detect month rollover
-  if (db.currentMonthKey && db.currentMonthKey !== monthKey) {
-    // Move current dashboards to "prev" slots (keep them for 7 days in main)
-    db.referral.prevMessageId = db.referral.messageId || null;
-    db.referral.prevMonthKey = db.currentMonthKey;
+  if (state.currentMonthKey && state.currentMonthKey !== monthKey) {
+    state.referral.prevMessageId = state.referral.messageId || null;
+    state.referral.prevMonthKey = state.currentMonthKey;
 
-    db.affiliate.prevMessageId = db.affiliate.messageId || null;
-    db.affiliate.prevMonthKey = db.currentMonthKey;
+    state.affiliate.prevMessageId = state.affiliate.messageId || null;
+    state.affiliate.prevMonthKey = state.currentMonthKey;
 
-    // Reset current message IDs so new month creates a fresh single pinned dashboard
-    db.referral.messageId = null;
-    db.affiliate.messageId = null;
+    state.referral.messageId = null;
+    state.affiliate.messageId = null;
 
-    db.currentMonthKey = monthKey;
-    db.rolloverAtMs = nowMs();
-    writeDB(db);
+    state.currentMonthKey = monthKey;
+    state.rolloverAtMs = nowMs();
 
-    console.log("✅ LEADERBOARD_MONTH_ROLLOVER:", db.referral.prevMonthKey, "->", monthKey);
-  } else if (!db.currentMonthKey) {
-    db.currentMonthKey = monthKey;
-    writeDB(db);
+    await writeState(state);
+    console.log("✅ LEADERBOARD_MONTH_ROLLOVER:", state.referral.prevMonthKey, "->", monthKey);
+  } else if (!state.currentMonthKey) {
+    state.currentMonthKey = monthKey;
+    await writeState(state);
   }
 
-  // Archive after 7 days (keeps only current month in main)
-  await archiveIfDue(client, db);
+  // Archive after 7 days
+  await archiveIfDue(client, state);
 
   const stats = referrals.getStats(monthKey);
 
-  // Referral = joins (a), tie = sales (b) only for stable ordering
   const refRows = topNFromStats(stats, "joins", "sales", 10);
   const affRows = topNFromStats(stats, "sales", "joins", 10);
 
@@ -386,10 +363,8 @@ async function refreshLeaderboards(client) {
     return { ok: false, reason: "channel_fetch_failed" };
   }
 
-  // Upsert ONLY the CURRENT month pinned dashboards (one per channel)
-  await upsertPinnedEmbed(refChannel, "referral", refEmbed, db);
-  await upsertPinnedEmbed(affChannel, "affiliate", affEmbed, db);
-  await archiveIfDue(client, db);
+  await upsertPinnedEmbed(refChannel, "referral", refEmbed, state);
+  await upsertPinnedEmbed(affChannel, "affiliate", affEmbed, state);
 
   console.log("✅ LEADERBOARDS_REFRESHED:", monthKey);
   return { ok: true, monthKey };
@@ -398,7 +373,6 @@ async function refreshLeaderboards(client) {
 let _timer = null;
 
 function startLeaderboardDashboards(client, opts = {}) {
-  // Keep your “live Updated” feeling (your screenshot showed ~30s)
   const everyMs = Number(opts.everyMs || 30_000);
 
   if (_timer) clearInterval(_timer);
