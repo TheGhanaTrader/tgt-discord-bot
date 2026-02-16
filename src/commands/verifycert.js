@@ -46,7 +46,7 @@ module.exports = {
     const code = normalizeCode(raw);
 
     // 1) Normal issued cert lookup
-    const cert = findCertificateByCode(code);
+    const cert = await findCertificateByCode(code);
     if (cert) {
       const rewardStatus = cert.rewardClaimable
         ? cert.claimed
@@ -85,7 +85,7 @@ module.exports = {
     }
 
     // 2) Legacy lookup
-    const legacyEntry = findLegacyByCode(code);
+    const legacyEntry = await findLegacyByCode(code);
     if (legacyEntry) {
       const legacyEmbed = new EmbedBuilder()
         .setTitle("🟨 Legacy Certificate (Recorded)")
@@ -115,7 +115,7 @@ module.exports = {
         });
       }
 
-      const res = markLegacyCertificate({
+      await markLegacyCertificate({
         code,
         markedByUserId: interaction.user.id,
         note: "Issued before verification system",
