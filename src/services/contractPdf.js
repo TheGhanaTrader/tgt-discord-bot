@@ -35,12 +35,13 @@ async function uploadPdfToBucket({ key, bytes }) {
     forcePathStyle: true,
   });
 
-  await s3.send(
+    await s3.send(
     new PutObjectCommand({
       Bucket: bucket,
       Key: key,
       Body: Buffer.from(bytes),
       ContentType: "application/pdf",
+      ContentDisposition: `attachment; filename="${path.basename(key)}"`,
     })
   );
 
