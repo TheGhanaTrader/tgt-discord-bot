@@ -288,7 +288,9 @@ async function handleContractAccept(interaction) {
     }
 
     // ✅ cleanup temp file (storage-only hygiene)
-    try { require("fs").unlinkSync(pdf.filePath); } catch {}
+    try {
+      if (pdf?.filePath) require("fs").unlinkSync(pdf.filePath);
+    } catch {}
 
     // Unlock
     await unlockAfterAcceptance(member);
