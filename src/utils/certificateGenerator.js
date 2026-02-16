@@ -1,18 +1,19 @@
 // src/utils/certificateGenerator.js
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const crypto = require("crypto");
 const QRCode = require("qrcode");
 const { createCanvas, loadImage } = require("canvas");
 
-// ---------- Paths ----------
-const DATA_DIR = path.join(process.cwd(), "data");
-const CERT_DIR = path.join(DATA_DIR, "certificates");
+// ---------- TEMP Paths (NO /data) ----------
+const TMP_DIR = path.join(os.tmpdir(), "tgt-certificates");
 
+// Keep branding assets local (read-only)
 const BG_PATH = path.join(process.cwd(), "assets", "branding", "certificate-bg.png");
 const LOGO_PATH = path.join(process.cwd(), "assets", "branding", "tgt-logo.png");
 
-if (!fs.existsSync(CERT_DIR)) fs.mkdirSync(CERT_DIR, { recursive: true });
+if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 
 // ---------- Canvas ----------
 const WIDTH = 1600;
@@ -66,11 +67,49 @@ function genVerificationCode16() {
   return crypto.randomBytes(8).toString("hex").toUpperCase(); // 16 chars
 }
 
+// ---------- Railway Bucket (S3-compatible) ----------
+function getS3Config() {
+  const endpoint = String(process.env.AWS_ENDPOINT_URL || "").trim();
+  const bucket = String(process.env.AWS_S3_BUCKET_NAME || "").trim();
+  const region = String(process.env.AWS_DEFAULT_REGION || "auto").trim();
+  const accessKeyId = String(process.env.AWS_ACCESS_KEY_ID || "").trim();
+  const secretAccessKey = String(process.env.AWS_SECRET_ACCESS_KEY || "").trim();
+
+  if (!endpoint || !bucket || !accessKeyId || !secretAccessKey) {
+    throw new Error(
+      "Bucket env vars missing. Required: AWS_ENDPOINT_URL, AWS_S3_BUCKET_NAME, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY (and AWS_DEFAULT_REGION optional)."
+    );
+  }
+  return { endpoint, bucket, region, accessKeyId, secretAccessKey };
+}
+
+async function uploadPngToBucket({ key, buffer }) {
+  const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
+  const { endpoint, bucket, region, accessKeyId, secretAccessKey } = getS3Config();
+
+  const s3 = new S3Client({
+    region,
+    endpoint,
+    credentials: { accessKeyId, secretAccessKey },
+    forcePathStyle: true,
+  });
+
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: buffer,
+      ContentType: "image/png",
+    })
+  );
+
+  return { bucket, key };
+}
+
 // ---------- QR (BUFFER SAFE + NEVER CRASH) ----------
 async function drawQR(ctx, verificationCode) {
   try {
-    const base =
-      process.env.CERT_VERIFY_BASE_URL || "https://theghanatrader.com/verify";
+    const base = process.env.CERT_VERIFY_BASE_URL || "https://theghanatrader.com/verify";
     const url = `${base}?code=${encodeURIComponent(verificationCode)}`;
 
     const pngBuffer = await QRCode.toBuffer(url, {
@@ -107,14 +146,7 @@ async function drawQR(ctx, verificationCode) {
   }
 }
 
-async function generateCertificatePNG({
-  username,
-  userId,
-  rank,
-  reward,
-  month,
-  verificationCode,
-}) {
+async function generateCertificatePNG({ username, userId, rank, reward, month, verificationCode }) {
   const canvas = createCanvas(WIDTH, HEIGHT);
   const ctx = canvas.getContext("2d");
 
@@ -146,14 +178,7 @@ async function generateCertificatePNG({
   ctx.fillRect(0, 0, WIDTH, HEIGHT);
 
   ctx.globalAlpha = 1;
-  const vignette = ctx.createRadialGradient(
-    centerX,
-    HEIGHT / 2,
-    200,
-    centerX,
-    HEIGHT / 2,
-    820
-  );
+  const vignette = ctx.createRadialGradient(centerX, HEIGHT / 2, 200, centerX, HEIGHT / 2, 820);
   vignette.addColorStop(0, "rgba(0,0,0,0)");
   vignette.addColorStop(1, "rgba(0,0,0,0.55)");
   ctx.fillStyle = vignette;
@@ -245,14 +270,28 @@ async function generateCertificatePNG({
   // ---------- QR (never allowed to crash) ----------
   await drawQR(ctx, code);
 
-  // ---------- Save ----------
+  // ---------- Save (TEMP) + Upload (Bucket) ----------
   const stamp = Date.now();
   const fileName = `honors_${safeMonth}_${safeFileName(name)}_${safeFileName(uid)}_${stamp}.png`;
-  const filePath = path.join(CERT_DIR, fileName);
+  const filePath = path.join(TMP_DIR, fileName);
 
-  fs.writeFileSync(filePath, canvas.toBuffer("image/png"));
+  const pngBuffer = canvas.toBuffer("image/png");
 
-  return { filePath, verificationCode: code };
+  // TEMP write for Discord AttachmentBuilder(filePath) compatibility
+  fs.writeFileSync(filePath, pngBuffer);
+
+  // Permanent upload to bucket (no /data)
+  const key = `certificates/${fileName}`;
+  const uploaded = await uploadPngToBucket({ key, buffer: pngBuffer });
+  const outPath = `s3://${uploaded.bucket}/${uploaded.key}`;
+
+  return {
+    filePath, // temp local path for immediate DM attachment
+    verificationCode: code,
+    bucketKey: uploaded.key,
+    bucketName: uploaded.bucket,
+    outPath, // s3 locator (not assuming public)
+  };
 }
 
 module.exports = { generateCertificatePNG };
