@@ -1,139 +1,159 @@
-const fs = require("fs");
-const path = require("path");
+// src/services/subscriptions.js
+"use strict";
 
-// Persistent JSON store (simple + reliable for Stage 1)
-const DATA_DIR = path.join(__dirname, "..", "..", "data");
-const FILE_PATH = path.join(DATA_DIR, "subscriptions.json");
+const os = require("os");
+const crypto = require("crypto");
+const { Pool } = require("pg");
 
-// Windows hardening: tiny sync sleep for retry backoff (EPERM/EACCES/EBUSY)
-function sleepSync(ms) {
-  try {
-    const sab = new SharedArrayBuffer(4);
-    const ia = new Int32Array(sab);
-    Atomics.wait(ia, 0, 0, ms);
-  } catch {
-    // fallback: do nothing (still safe)
-  }
+// Postgres job_state key
+const JOB_KEY = "subscriptions_store";
+
+let _pool = null;
+
+function pool() {
+  if (_pool) return _pool;
+
+  const url = process.env.DATABASE_URL;
+  if (!url) throw new Error("DATABASE_URL is required (subscriptions in Postgres)");
+
+  _pool = new Pool({
+    connectionString: url,
+    ssl: process.env.PGSSLMODE === "disable" ? false : { rejectUnauthorized: false },
+  });
+
+  return _pool;
 }
 
-function ensureStore() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-  if (!fs.existsSync(FILE_PATH)) {
-    fs.writeFileSync(FILE_PATH, JSON.stringify({ users: {} }, null, 2), "utf8");
-  }
+// ---- Storage shape (same as your JSON file) ----
+function defaultStore() {
+  return { users: {} };
 }
 
-function readStore() {
-  ensureStore();
+async function readStore() {
   try {
-    const raw = fs.readFileSync(FILE_PATH, "utf8");
-    const parsed = JSON.parse(raw);
+    const p = pool();
+
+    // ✅ IMPORTANT: your table has `state` (jsonb), not state_json
+    const q = `SELECT state FROM public.job_state WHERE job_key = $1 LIMIT 1`;
+    const { rows } = await p.query(q, [JOB_KEY]);
+    const raw = rows?.[0]?.state;
+
+    const parsed = raw && typeof raw === "object" ? raw : {};
     if (!parsed.users) parsed.users = {};
     return parsed;
   } catch {
-    return { users: {} };
+    return defaultStore();
   }
-  
 }
 
-let _isWriting = false;
+async function writeStore(store) {
+  const p = pool();
 
-function writeStore(store) {
-  ensureStore();
-  if (!store.users) store.users = {};
+  const safe = store && typeof store === "object" ? store : defaultStore();
+  if (!safe.users) safe.users = {};
 
-  // Prevent overlapping writes (Windows EPERM fix)
-  const MAX_WAIT_LOOPS = 50; // ~1s max wait
-  let loops = 0;
-  while (_isWriting && loops < MAX_WAIT_LOOPS) {
-    sleepSync(20);
-    loops++;
-  }
+  const q = `
+    INSERT INTO public.job_state (job_key, state, updated_at)
+    VALUES ($1, $2::jsonb, NOW())
+    ON CONFLICT (job_key)
+    DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
+  `;
 
-  _isWriting = true;
+  await p.query(q, [JOB_KEY, JSON.stringify(safe)]);
+}
+
+// ---- Best-effort lock (replaces Windows EPERM write guard) ----
+// Keeps “no overlapping writes” intent, but for multi-instance Railway.
+async function withLock(fn, ttlSeconds = 20) {
+  const p = pool();
+  const lockBy = `${os.hostname()}:${process.pid}:${crypto.randomBytes(4).toString("hex")}`;
+
+  const q = `
+    INSERT INTO public.job_state (job_key, state, locked_until, locked_by, updated_at)
+    VALUES ($1, '{}'::jsonb, NOW() + ($2 || ' seconds')::interval, $3, NOW())
+    ON CONFLICT (job_key)
+    DO UPDATE SET
+      locked_until = CASE
+        WHEN public.job_state.locked_until IS NULL OR public.job_state.locked_until < NOW()
+        THEN NOW() + ($2 || ' seconds')::interval
+        ELSE public.job_state.locked_until
+      END,
+      locked_by = CASE
+        WHEN public.job_state.locked_until IS NULL OR public.job_state.locked_until < NOW()
+        THEN $3
+        ELSE public.job_state.locked_by
+      END,
+      updated_at = NOW()
+    RETURNING locked_by
+  `;
+
+  const { rows } = await p.query(q, [JOB_KEY, String(ttlSeconds), lockBy]);
+  const owner = rows?.[0]?.locked_by;
+
+  // If we don't own the lock, we DO NOT write (prevents clobber)
+  if (owner !== lockBy) return fn({ locked: false, lockBy });
 
   try {
-    // atomic write (avoids corrupted JSON)
-    const tmp = `${FILE_PATH}.tmp`;
-
-    const MAX_RETRIES = 6;
-    let lastErr = null;
-
-    for (let i = 0; i < MAX_RETRIES; i++) {
-      try {
-        fs.writeFileSync(tmp, JSON.stringify(store, null, 2), "utf8");
-
-        try {
-          fs.renameSync(tmp, FILE_PATH);
-        } catch (e) {
-          if (e && (e.code === "EPERM" || e.code === "EACCES" || e.code === "EBUSY")) {
-            try { fs.unlinkSync(FILE_PATH); } catch (_) {}
-            fs.renameSync(tmp, FILE_PATH);
-          } else {
-            throw e;
-          }
-        }
-
-        return; // ✅ success
-      } catch (err) {
-        lastErr = err;
-        const code = err && err.code;
-
-        if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") break;
-
-        sleepSync(30 * (i + 1));
-      }
-    }
-
-    console.error("SUBSCRIPTIONS_WRITE_FAILED:", lastErr && lastErr.code, lastErr && lastErr.message);
-    throw lastErr;
-
+    return await fn({ locked: true, lockBy });
   } finally {
-    _isWriting = false;
-    try { fs.unlinkSync(`${FILE_PATH}.tmp`); } catch (_) {}
+    await p
+      .query(
+        `UPDATE public.job_state
+         SET locked_until = NULL, locked_by = NULL, updated_at = NOW()
+         WHERE job_key = $1 AND locked_by = $2`,
+        [JOB_KEY, lockBy]
+      )
+      .catch(() => null);
   }
 }
 
+// ---- Public API (same behavior, now async) ----
 
-function getSubscription(discordId) {
-  const store = readStore();
+async function getSubscription(discordId) {
+  const store = await readStore();
   return store.users[String(discordId)] || null;
 }
 
-function upsertSubscription(discordId, patch) {
-  const store = readStore();
+async function upsertSubscription(discordId, patch) {
   const id = String(discordId);
 
-  const current = store.users[id] || {
-    discord_id: id,
-    tier: null,
-    status: "inactive",
-    expires_at: null,
-    last_paystack_ref: null,
-    expired_notified_at: null,
-    reminders: { d3: false, h24: false },
-    created_at: new Date().toISOString(),
-    updated_at: new Date().toISOString(),
-  };
+  return withLock(async ({ locked }) => {
+    // If lock not acquired, avoid conflicting writes
+    if (!locked) return null;
 
-  const next = {
-    ...current,
-    ...patch,
-    discord_id: current.discord_id || id,
-    reminders: {
-      ...current.reminders,
-      ...(patch.reminders || {}),
-    },
-    updated_at: new Date().toISOString(),
-  };
+    const store = await readStore();
 
-  store.users[id] = next;
-  writeStore(store);
-  return next;
+    const current = store.users[id] || {
+      discord_id: id,
+      tier: null,
+      status: "inactive",
+      expires_at: null,
+      last_paystack_ref: null,
+      expired_notified_at: null,
+      reminders: { d3: false, h24: false },
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const next = {
+      ...current,
+      ...patch,
+      discord_id: current.discord_id || id,
+      reminders: {
+        ...current.reminders,
+        ...(patch?.reminders || {}),
+      },
+      updated_at: new Date().toISOString(),
+    };
+
+    store.users[id] = next;
+    await writeStore(store);
+    return next;
+  });
 }
 
-function listAllSubscriptions() {
-  const store = readStore();
+async function listAllSubscriptions() {
+  const store = await readStore();
   return Object.entries(store.users || {}).map(([id, sub]) => ({
     discord_id: sub.discord_id || id,
     ...sub,

@@ -67,7 +67,7 @@ function startSubscriptionMonitor(client, { TIERS, LOG_CHANNEL_ID, DISCORD_GUILD
   async function tick() {
     try {
       console.log("SUB_MONITOR_TICK:", new Date().toISOString());
-      const subs = listAllSubscriptions();
+      const subs = await listAllSubscriptions();
       console.log("SUB_MONITOR_USERS:", subs.length);
 
       const now = new Date();
@@ -105,7 +105,7 @@ if (msLeft <= 0) {
     // 🧾 LOG EXPIRY ONLY ONCE
     if (!sub.expired_logged_at) {
       await log(`⛔ Expired: <@${sub.discord_id}> (${String(sub.tier || "").toUpperCase()})`);
-      upsertSubscription(sub.discord_id, { expired_logged_at: Date.now() });
+      await upsertSubscription(sub.discord_id, { expired_logged_at: Date.now() });
     }
 
     // 🔒 SEND EXPIRED DM ONLY ONCE
@@ -119,7 +119,7 @@ if (msLeft <= 0) {
 
       await safeDM(member, { embeds: [embed], components: [row] });
 
-      upsertSubscription(sub.discord_id, {
+      await upsertSubscription(sub.discord_id, {
         status: "expired",
         expired_notified_at: Date.now(),
         reminders: { d3: true, h24: true },
@@ -146,7 +146,7 @@ if (msLeft <= 0) {
             await log(`⏳ 3-day reminder: <@${sub.discord_id}>`);
           }
 
-          upsertSubscription(sub.discord_id, { reminders: { d3: true } });
+          await upsertSubscription(sub.discord_id, { reminders: { d3: true } });
         }
 
         // 🔶 24-HOUR REMINDER
@@ -164,7 +164,7 @@ if (msLeft <= 0) {
             await log(`⚠️ 24-hour reminder: <@${sub.discord_id}>`);
           }
 
-          upsertSubscription(sub.discord_id, { reminders: { h24: true } });
+          await upsertSubscription(sub.discord_id, { reminders: { h24: true } });
         }
       }
 
