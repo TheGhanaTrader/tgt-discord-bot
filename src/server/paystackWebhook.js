@@ -415,6 +415,18 @@ async function discordFetchUser(accessToken) {
 
   // Health
   app.get("/", (req, res) => res.status(200).send("OK"));
+  // ✅ Logout / cookie reset (for clean testing)
+app.get("/auth/logout", rateLimit, (req, res) => {
+  try {
+    res.clearCookie("tgt_oauth");
+    res.clearCookie("tgt_ref");
+    return res.status(200).send("OK: cleared tgt_oauth + tgt_ref");
+  } catch (e) {
+    console.log("LOGOUT_ERR:", e?.message || e);
+    return res.status(500).send("Logout failed");
+  }
+});
+
   // ✅ Join-first referral link: /r?ref=REFERRER_DISCORD_ID
 app.get("/r", rateLimit, async (req, res) => {
   try {
