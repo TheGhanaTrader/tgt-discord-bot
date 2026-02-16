@@ -121,9 +121,9 @@ async function readDB() {
   const p = getPool();
 
   try {
-    const q = `SELECT state_json FROM public.job_state WHERE job_key = $1 LIMIT 1`;
+    const q = `SELECT state FROM public.job_state WHERE job_key = $1 LIMIT 1`;
     const { rows } = await p.query(q, [JOB_KEY]);
-    const raw = rows?.[0]?.state_json;
+    const raw = rows?.[0]?.state;
 
     const db = raw && typeof raw === "object" ? raw : {};
     db.referral = db.referral || { messageId: null, prevMessageId: null, prevMonthKey: null };
@@ -143,11 +143,11 @@ async function writeDB(db) {
   const safe = db && typeof db === "object" ? db : defaultDB();
 
   const q = `
-    INSERT INTO public.job_state (job_key, state_json, updated_at)
-    VALUES ($1, $2::jsonb, NOW())
-    ON CONFLICT (job_key)
-    DO UPDATE SET state_json = EXCLUDED.state_json, updated_at = NOW()
-  `;
+  INSERT INTO public.job_state (job_key, state, updated_at)
+  VALUES ($1, $2::jsonb, NOW())
+  ON CONFLICT (job_key)
+  DO UPDATE SET state = EXCLUDED.state, updated_at = NOW()
+`;
 
   await p.query(q, [JOB_KEY, JSON.stringify(safe)]);
 }
