@@ -38,7 +38,7 @@ module.exports = {
 
     let certs;
     try {
-      certs = getUserCertificates(userId);
+      certs = await getUserCertificates(userId);
     } catch (err) {
       return interaction.editReply("❌ Failed to load your certificates.");
     }
