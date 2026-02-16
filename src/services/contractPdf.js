@@ -1,6 +1,9 @@
 // src/services/contractPdf.js
+"use strict";
+
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
 const { PDFDocument, StandardFonts, rgb } = require("pdf-lib");
 const { templatePdfPath } = require("../config/contractGate");
 
@@ -22,16 +25,14 @@ function getS3Config() {
 }
 
 async function uploadPdfToBucket({ key, bytes }) {
-  // Requires dependency: @aws-sdk/client-s3
   const { S3Client, PutObjectCommand } = require("@aws-sdk/client-s3");
-
   const { endpoint, bucket, region, accessKeyId, secretAccessKey } = getS3Config();
 
   const s3 = new S3Client({
     region,
     endpoint,
     credentials: { accessKeyId, secretAccessKey },
-    forcePathStyle: true, // important for many S3-compatible endpoints (incl. Railway)
+    forcePathStyle: true,
   });
 
   await s3.send(
@@ -43,7 +44,6 @@ async function uploadPdfToBucket({ key, bytes }) {
     })
   );
 
-  // We return a stable locator string (not assuming public access)
   return { bucket, key };
 }
 
@@ -69,8 +69,6 @@ async function generatePersonalizedContractPdf({ username, userId, tier, accepte
   const lastPage = pages[pages.length - 1];
 
   // ---- Stamp settings (safe defaults) ----
-  // Places a small "Acceptance Record" block near bottom of last page.
-  // If you want it elsewhere, change x/y.
   const { width } = lastPage.getSize();
   const x = 50;
   const y = 60; // near bottom
@@ -109,18 +107,28 @@ async function generatePersonalizedContractPdf({ username, userId, tier, accepte
   }
 
   const fileName = `Contract_${safeName(username)}_${userId}_${acceptedAtUtc.replace(/[:]/g, "-")}.pdf`;
-
   const outBytes = await pdfDoc.save();
 
-  // ✅ Upload to Railway Bucket (NO /data writes)
+  // ✅ TEMP write (for DM + log attachment) — NO /data
+  const tmpDir = path.join(os.tmpdir(), "tgt-contracts");
+  if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
+  const filePath = path.join(tmpDir, fileName);
+  fs.writeFileSync(filePath, Buffer.from(outBytes));
+
+  // ✅ Upload to Railway Bucket (permanent storage)
   const key = `contracts/${fileName}`;
   const uploaded = await uploadPdfToBucket({ key, bytes: outBytes });
 
-  // Keep return shape stable. outPath becomes a bucket locator.
-  // (Later we’ll store uploaded.key / bucket in Postgres instead of filesystem paths.)
+  // stable locator (not assuming public)
   const outPath = `s3://${uploaded.bucket}/${uploaded.key}`;
 
-  return { outPath, fileName, bucketKey: uploaded.key, bucketName: uploaded.bucket };
+  return {
+    filePath,              // local temp path for AttachmentBuilder
+    fileName,
+    outPath,               // bucket locator
+    bucketKey: uploaded.key,
+    bucketName: uploaded.bucket,
+  };
 }
 
 module.exports = { generatePersonalizedContractPdf };
