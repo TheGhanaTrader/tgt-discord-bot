@@ -377,7 +377,12 @@ function verifyOAuthState(state) {
 
   const payload = base64UrlDecode(b64);
   const ageMs = Date.now() - Number(payload.ts || 0);
-  if (!payload.tier || ageMs < 0 || ageMs > 10 * 60 * 1000) return null; // 10 minutes
+
+  const isRefFlow = String(payload.flow || "") === "ref";
+
+  // ✅ allow referral-only OAuth state without tier (bind-only)
+  if ((!payload.tier && !isRefFlow) || ageMs < 0 || ageMs > 10 * 60 * 1000) return null; // 10 minutes
+
   return payload;
 }
 
@@ -427,32 +432,15 @@ app.get("/auth/logout", rateLimit, (req, res) => {
   }
 });
 
-  // ✅ Join-first referral link: /r?ref=REFERRER_DISCORD_ID
-app.get("/r", rateLimit, async (req, res) => {
-  try {
-    const invite = String(process.env.DISCORD_INVITE_URL || "").trim();
-    if (!invite) return res.status(500).send("DISCORD_INVITE_URL missing.");
+   const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+    if (!base) return res.status(500).send("PUBLIC_BASE_URL missing.");
 
-    const refRaw = String(req.query.ref || "").trim();
-    const ref = /^\d{17,20}$/.test(refRaw) ? refRaw : "";
+    // ✅ Referral-bind flow: OAuth identify (bind mapping) then redirect to Discord invite
+    const u = new URL(`${base}/auth/discord/start`);
+    u.searchParams.set("flow", "ref");
+    if (ref) u.searchParams.set("ref", ref);
 
-    // Store referral for later (when user hits /auth/discord/start from gates)
-    if (ref) {
-      res.cookie("tgt_ref", { ref, ts: Date.now() }, {
-        httpOnly: true,
-        signed: true,
-        sameSite: "lax",
-        secure: true,
-        maxAge: 1000 * 60 * 60 * 24, // 24h
-      });
-    }
-
-    return res.redirect(302, invite);
-  } catch (e) {
-    console.log("REF_JOIN_LINK_ERR:", e?.message || e);
-    return res.status(500).send("Referral redirect failed.");
-  }
-});
+    return res.redirect(302, u.toString());
 
   // ✅ Public Verify Page
   app.get("/verify", rateLimit, (req, res) => {
@@ -625,6 +613,14 @@ app.get("/auth/discord/callback", rateLimit, async (req, res) => {
 if (referrerId && user?.id && referrerId !== String(user.id)) {
   try {
     const bindRes = await mapInvite(String(user.id), referrerId); // memberId first, inviterId second
+        // ✅ Referral-only flow: after binding, send user to Discord invite (no Paystack)
+    const isRefFlow = String(payload.flow || "") === "ref";
+    if (isRefFlow) {
+      const invite = String(process.env.DISCORD_INVITE_URL || "").trim();
+      if (!invite) return res.status(500).send("DISCORD_INVITE_URL missing.");
+      return res.redirect(302, invite);
+    }
+
     console.log("✅ REF_BIND_OK:", bindRes || "ok");
   } catch (e) {
     console.log("REF_BIND_ERR:", e?.message || e);
