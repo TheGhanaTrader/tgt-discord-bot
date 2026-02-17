@@ -435,12 +435,15 @@ app.get("/auth/logout", rateLimit, (req, res) => {
    const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
     if (!base) return res.status(500).send("PUBLIC_BASE_URL missing.");
 
-    // ✅ Referral-bind flow: OAuth identify (bind mapping) then redirect to Discord invite
-    const u = new URL(`${base}/auth/discord/start`);
-    u.searchParams.set("flow", "ref");
-    if (ref) u.searchParams.set("ref", ref);
+   // ✅ Referral-bind flow: OAuth identify (bind mapping) then redirect to Discord invite
+   const refRaw = String(req.query.ref || "").trim();
+   const ref = /^\d{17,20}$/.test(refRaw) ? refRaw : "";
 
-    return res.redirect(302, u.toString());
+   const u = new URL(`${base}/auth/discord/start`);
+   u.searchParams.set("flow", "ref");
+   if (ref) u.searchParams.set("ref", ref);
+
+   return res.redirect(302, u.toString());
 
   // ✅ Public Verify Page
   app.get("/verify", rateLimit, (req, res) => {
