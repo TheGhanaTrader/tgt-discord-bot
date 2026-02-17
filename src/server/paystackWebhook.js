@@ -6,10 +6,7 @@ const { sendPostUpgradeDm } = require("../services/postUpgradeDm");
 const { mapInvite } = require("../services/referrals");
 
 // ✅ Public verify reads from the same certificate registry used by /verifycert
-const {
-  findCertificateByCode,
-  findLegacyByCode,
-} = require("../services/certificatesLedger");
+const { findCertificateByCode, findLegacyByCode } = require("../services/certificatesLedger");
 
 // -------------------- Helpers --------------------
 function normalizeCode(input) {
@@ -339,129 +336,130 @@ function startPaystackWebhookServer() {
   app.use(cookieParser(process.env.OAUTH_SESSION_SECRET));
 
   function base64UrlEncode(obj) {
-  return Buffer.from(JSON.stringify(obj), "utf8")
-    .toString("base64")
-    .replace(/\+/g, "-")
-    .replace(/\//g, "_")
-    .replace(/=+$/g, "");
-}
+    return Buffer.from(JSON.stringify(obj), "utf8")
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/g, "");
+  }
 
-function base64UrlDecode(str) {
-  const pad = str.length % 4 === 0 ? "" : "=".repeat(4 - (str.length % 4));
-  const b64 = str.replace(/-/g, "+").replace(/_/g, "/") + pad;
-  return JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
-}
+  function base64UrlDecode(str) {
+    const pad = str.length % 4 === 0 ? "" : "=".repeat(4 - (str.length % 4));
+    const b64 = str.replace(/-/g, "+").replace(/_/g, "/") + pad;
+    return JSON.parse(Buffer.from(b64, "base64").toString("utf8"));
+  }
 
-function signState(payloadB64) {
-  const secret = process.env.OAUTH_STATE_SECRET || process.env.PAYSTACK_SECRET_KEY;
-  if (!secret) throw new Error("Missing OAUTH_STATE_SECRET (or PAYSTACK_SECRET_KEY fallback).");
-  return crypto.createHmac("sha256", secret).update(payloadB64).digest("hex");
-}
+  function signState(payloadB64) {
+    const secret = process.env.OAUTH_STATE_SECRET || process.env.PAYSTACK_SECRET_KEY;
+    if (!secret) throw new Error("Missing OAUTH_STATE_SECRET (or PAYSTACK_SECRET_KEY fallback).");
+    return crypto.createHmac("sha256", secret).update(payloadB64).digest("hex");
+  }
 
-function makeOAuthState({ tier }) {
-  const payload = {
-  ...arguments[0], // keeps tier AND ref
-  ts: Date.now(),
-  nonce: crypto.randomBytes(12).toString("hex"),
-};
-  const b64 = base64UrlEncode(payload);
-  const sig = signState(b64);
-  return `${b64}.${sig}`;
-}
+  function makeOAuthState({ tier }) {
+    const payload = {
+      ...arguments[0], // keeps tier AND ref AND flow
+      ts: Date.now(),
+      nonce: crypto.randomBytes(12).toString("hex"),
+    };
+    const b64 = base64UrlEncode(payload);
+    const sig = signState(b64);
+    return `${b64}.${sig}`;
+  }
 
-function verifyOAuthState(state) {
-  if (!state || !String(state).includes(".")) return null;
-  const [b64, sig] = String(state).split(".");
-  const expected = signState(b64);
-  if (sig !== expected) return null;
+  function verifyOAuthState(state) {
+    if (!state || !String(state).includes(".")) return null;
+    const [b64, sig] = String(state).split(".");
+    const expected = signState(b64);
+    if (sig !== expected) return null;
 
-  const payload = base64UrlDecode(b64);
-  const ageMs = Date.now() - Number(payload.ts || 0);
+    const payload = base64UrlDecode(b64);
+    const ageMs = Date.now() - Number(payload.ts || 0);
 
-  const isRefFlow = String(payload.flow || "") === "ref";
+    const isRefFlow = String(payload.flow || "") === "ref";
 
-  // ✅ allow referral-only OAuth state without tier (bind-only)
-  if ((!payload.tier && !isRefFlow) || ageMs < 0 || ageMs > 10 * 60 * 1000) return null; // 10 minutes
+    // ✅ allow referral-only OAuth state without tier (bind-only)
+    if ((!payload.tier && !isRefFlow) || ageMs < 0 || ageMs > 10 * 60 * 1000) return null; // 10 minutes
 
-  return payload;
-}
+    return payload;
+  }
 
-async function discordExchangeCodeForToken(code, redirectUri) {
-  const clientId = process.env.DISCORD_CLIENT_ID;
-  const clientSecret = process.env.DISCORD_CLIENT_SECRET;
-  if (!clientId || !clientSecret) throw new Error("Missing DISCORD_CLIENT_ID or DISCORD_CLIENT_SECRET");
+  async function discordExchangeCodeForToken(code, redirectUri) {
+    const clientId = process.env.DISCORD_CLIENT_ID;
+    const clientSecret = process.env.DISCORD_CLIENT_SECRET;
+    if (!clientId || !clientSecret) throw new Error("Missing DISCORD_CLIENT_ID or DISCORD_CLIENT_SECRET");
 
-  const body = new URLSearchParams();
-  body.set("client_id", clientId);
-  body.set("client_secret", clientSecret);
-  body.set("grant_type", "authorization_code");
-  body.set("code", code);
-  body.set("redirect_uri", redirectUri);
+    const body = new URLSearchParams();
+    body.set("client_id", clientId);
+    body.set("client_secret", clientSecret);
+    body.set("grant_type", "authorization_code");
+    body.set("code", code);
+    body.set("redirect_uri", redirectUri);
 
-  const r = await fetch("https://discord.com/api/oauth2/token", {
-    method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
-    body,
-  });
+    const r = await fetch("https://discord.com/api/oauth2/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
 
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error(data?.error_description || data?.error || "Discord token exchange failed");
-  return data; // { access_token, token_type, ... }
-}
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(data?.error_description || data?.error || "Discord token exchange failed");
+    return data;
+  }
 
-async function discordFetchUser(accessToken) {
-  const r = await fetch("https://discord.com/api/users/@me", {
-    headers: { Authorization: `Bearer ${accessToken}` },
-  });
-  const data = await r.json().catch(() => ({}));
-  if (!r.ok) throw new Error("Discord user fetch failed");
-  return data; // { id, username, ... }
-}
+  async function discordFetchUser(accessToken) {
+    const r = await fetch("https://discord.com/api/users/@me", {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error("Discord user fetch failed");
+    return data;
+  }
 
   // Health
   app.get("/", (req, res) => res.status(200).send("OK"));
+
   // ✅ Logout / cookie reset (for clean testing)
-app.get("/auth/logout", rateLimit, (req, res) => {
-  try {
-    res.clearCookie("tgt_oauth");
-    res.clearCookie("tgt_ref");
-    return res.status(200).send("OK: cleared tgt_oauth + tgt_ref");
-  } catch (e) {
-    console.log("LOGOUT_ERR:", e?.message || e);
-    return res.status(500).send("Logout failed");
-  }
-});
+  app.get("/auth/logout", rateLimit, (req, res) => {
+    try {
+      res.clearCookie("tgt_oauth");
+      res.clearCookie("tgt_ref");
+      return res.status(200).send("OK: cleared tgt_oauth + tgt_ref");
+    } catch (e) {
+      console.log("LOGOUT_ERR:", e?.message || e);
+      return res.status(500).send("Logout failed");
+    }
+  });
 
-// ✅ Referral link entry: sets cookie then starts referral-only OAuth bind flow
-app.get("/r", rateLimit, (req, res) => {
-  try {
-    const refRaw = String(req.query.ref || "").trim();
-    const ref = /^\d{17,20}$/.test(refRaw) ? refRaw : "";
-    if (!ref) return res.status(400).send("Invalid ref.");
+  // ✅ Referral link entry: sets cookie then starts referral-only OAuth bind flow
+  app.get("/r", rateLimit, (req, res) => {
+    try {
+      const refRaw = String(req.query.ref || "").trim();
+      const ref = /^\d{17,20}$/.test(refRaw) ? refRaw : "";
+      if (!ref) return res.status(400).send("Invalid ref.");
 
-    // store in signed cookie so we can bind even if query is lost later
-    res.cookie(
-      "tgt_ref",
-      { ref, ts: Date.now() },
-      {
-        signed: true,
-        httpOnly: true,
-        sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
-        maxAge: 24 * 60 * 60 * 1000, // 24h
-      }
-    );
+      // store in signed cookie so we can bind even if query is lost later
+      res.cookie(
+        "tgt_ref",
+        { ref, ts: Date.now() },
+        {
+          signed: true,
+          httpOnly: true,
+          sameSite: "lax",
+          secure: process.env.NODE_ENV === "production",
+          maxAge: 24 * 60 * 60 * 1000, // 24h
+        }
+      );
 
-    const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
-    if (!base) return res.status(500).send("PUBLIC_BASE_URL missing.");
+      const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+      if (!base) return res.status(500).send("PUBLIC_BASE_URL missing.");
 
-    // send into referral-only OAuth flow (bind mapping) -> then redirect to Discord invite
-    return res.redirect(302, `${base}/auth/discord/start?flow=ref`);
-  } catch (e) {
-    console.log("REF_LINK_ERR:", e?.message || e);
-    return res.status(500).send("Referral start failed");
-  }
-});
+      // send into referral-only OAuth flow (bind mapping) -> then redirect to Discord invite
+      return res.redirect(302, `${base}/auth/discord/start?flow=ref`);
+    } catch (e) {
+      console.log("REF_LINK_ERR:", e?.message || e);
+      return res.status(500).send("Referral start failed");
+    }
+  });
 
   // ✅ Public Verify Page
   app.get("/verify", rateLimit, (req, res) => {
@@ -548,140 +546,153 @@ app.get("/r", rateLimit, (req, res) => {
     }
   });
 
-  // ✅ Discord OAuth start: 1-click from public gate -> Discord identify -> auto-redirect to Paystack
-app.get("/auth/discord/start", rateLimit, async (req, res) => {
-  try {
-    const flow = String(req.query.flow || "").trim();
-    const isRefFlow = flow === "ref";
-    const tier = String(req.query.tier || "").toUpperCase();
-    const effectiveTier = tier || "SILVER"; // default when ?tier is missing (referral links)
-    // 🔗 Optional referral id passed in URL: ?ref=REFERRER_DISCORD_ID
-    const refRaw = String(req.query.ref || "").trim();
-    const refQ = /^\d{17,20}$/.test(refRaw) ? refRaw : "";
-    const refC = req.signedCookies?.tgt_ref?.ref;
-    const ref = refQ || (/^\d{17,20}$/.test(String(refC || "")) ? String(refC) : "");
+  // ✅ Discord OAuth start: gate -> Discord identify -> (Paystack OR referral-only invite)
+  app.get("/auth/discord/start", rateLimit, async (req, res) => {
+    try {
+      const tier = String(req.query.tier || "").toUpperCase();
+      const flow = String(req.query.flow || "").trim();
+      const isRefFlow = flow === "ref";
 
-        const allowed = new Set(["SILVER", "GOLD", "DIAMOND"]);
-    if (!isRefFlow) {
-      if (!allowed.has(effectiveTier)) {
-        return res.status(400).send("Invalid tier.");
+      const effectiveTier = tier || "SILVER"; // default when ?tier missing (doesn't matter for ref flow)
+
+      // 🔗 Optional referral id passed in URL: ?ref=REFERRER_DISCORD_ID
+      const refRaw = String(req.query.ref || "").trim();
+      const refQ = /^\d{17,20}$/.test(refRaw) ? refRaw : "";
+      const refC = req.signedCookies?.tgt_ref?.ref;
+      const ref = refQ || (/^\d{17,20}$/.test(String(refC || "")) ? String(refC) : "");
+
+      const allowed = new Set(["SILVER", "GOLD", "DIAMOND"]);
+      if (!isRefFlow) {
+        if (!allowed.has(effectiveTier)) return res.status(400).send("Invalid tier.");
       }
-    }
 
-    // 🔁 Silent OAuth reuse (skip Discord authorize if session exists)
-    const sess = req.signedCookies?.tgt_oauth;
-    if (sess?.discordUserId) {
-      console.log("OAUTH_REUSE_HIT discordUserId=", String(sess.discordUserId));
-      console.log("OAUTH_REUSE_REF=", ref);
+      // 🔁 Silent OAuth reuse (skip Discord authorize if session exists)
+      const sess = req.signedCookies?.tgt_oauth;
+      if (sess?.discordUserId) {
+        console.log("OAUTH_REUSE_HIT discordUserId=", String(sess.discordUserId));
+        console.log("OAUTH_REUSE_REF=", ref);
+
+        // ✅ Bind referral immediately if present
+        if (ref && String(sess.discordUserId) && ref !== String(sess.discordUserId)) {
+          try {
+            const bindRes = await mapInvite(String(sess.discordUserId), ref); // memberId first, inviterId second
+            console.log("✅ OAUTH_REUSE_BIND_OK:", bindRes || "ok");
+            res.clearCookie("tgt_ref");
+          } catch (e) {
+            console.log("REF_BIND_ERR(sess):", e?.message || e);
+          }
+        }
+
+        // ✅ Referral-only flow should go to Discord invite (never Paystack)
+        if (isRefFlow) {
+          const invite = String(process.env.DISCORD_INVITE_URL || "").trim();
+          if (!invite) return res.status(500).send("DISCORD_INVITE_URL missing.");
+          return res.redirect(302, invite);
+        }
+
+        const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+        const payUrl = new URL(`${base}/pay/subscribe`);
+        payUrl.searchParams.set("tier", effectiveTier);
+        payUrl.searchParams.set("discordUserId", String(sess.discordUserId));
+        return res.redirect(302, payUrl.toString());
+      }
 
       const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
-      const payUrl = new URL(`${base}/pay/subscribe`);
-      payUrl.searchParams.set("tier", effectiveTier);
-      payUrl.searchParams.set("discordUserId", String(sess.discordUserId));
-      // ✅ If referral link used but OAuth session exists, bind now
-if (ref && String(sess.discordUserId) && ref !== String(sess.discordUserId)) {
-  try {
-    const bindRes = await mapInvite(String(sess.discordUserId), ref); // memberId first, inviterId second
-    console.log("✅ OAUTH_REUSE_BIND_OK:", bindRes || "ok");
-    res.clearCookie("tgt_ref");
+      if (!base) return res.status(500).send("PUBLIC_BASE_URL missing.");
 
-  } catch (e) {
-    console.log("REF_BIND_ERR(sess):", e?.message || e);
-  }
-        // ✅ Referral-only flow: redirect to Discord, NOT Paystack
+      const redirectUri = `${base}/auth/discord/callback`;
+
+      // ✅ include flow + ref in signed state
+      const state = makeOAuthState({
+        tier: isRefFlow ? (tier ? effectiveTier : undefined) : effectiveTier,
+        ref,
+        flow: isRefFlow ? "ref" : "",
+      });
+
+      const clientId = process.env.DISCORD_CLIENT_ID;
+      if (!clientId) return res.status(500).send("DISCORD_CLIENT_ID missing.");
+
+      const u = new URL("https://discord.com/api/oauth2/authorize");
+      u.searchParams.set("client_id", clientId);
+      u.searchParams.set("redirect_uri", redirectUri);
+      u.searchParams.set("response_type", "code");
+      u.searchParams.set("scope", "identify");
+      u.searchParams.set("state", state);
+
+      return res.redirect(302, u.toString());
+    } catch (e) {
+      console.log("OAUTH_START_ERR:", e?.message || e);
+      return res.status(500).send("OAuth start failed.");
+    }
+  });
+
+  // ✅ Discord OAuth callback: binds user id -> (Paystack OR referral-only invite)
+  app.get("/auth/discord/callback", rateLimit, async (req, res) => {
+    try {
+      const code = String(req.query.code || "");
+      const state = String(req.query.state || "");
+      if (!code || !state) return res.status(400).send("Missing code/state.");
+
+      const payload = verifyOAuthState(state);
+      if (!payload) return res.status(400).send("Invalid or expired state.");
+
+      const isRefFlow = String(payload.flow || "") === "ref";
+
+      const tier = String(payload.tier || "").toUpperCase();
+      console.log("OAUTH_PAYLOAD:", payload);
+
+      const referrerId = /^\d{17,20}$/.test(String(payload.ref || "")) ? String(payload.ref) : "";
+
+      const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+      const redirectUri = `${base}/auth/discord/callback`;
+
+      const token = await discordExchangeCodeForToken(code, redirectUri);
+      const user = await discordFetchUser(token.access_token);
+
+      // 🔐 Store short-lived OAuth session (silent reuse)
+      res.cookie(
+        "tgt_oauth",
+        {
+          discordUserId: String(user.id),
+          issuedAt: Date.now(),
+        },
+        {
+          httpOnly: true,
+          signed: true,
+          sameSite: "lax",
+          secure: process.env.NODE_ENV === "production",
+          maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
+        }
+      );
+
+      // 🧷 Attempt referral bind once (immutable). Safe no-op if invalid/duplicate/self.
+      if (referrerId && user?.id && referrerId !== String(user.id)) {
+        try {
+          const bindRes = await mapInvite(String(user.id), referrerId); // memberId first, inviterId second
+          console.log("✅ REF_BIND_OK:", bindRes || "ok");
+          res.clearCookie("tgt_ref");
+        } catch (e) {
+          console.log("REF_BIND_ERR:", e?.message || e);
+        }
+      }
+
+      // ✅ Referral-only flow: ALWAYS go to Discord invite (never Paystack)
       if (isRefFlow) {
         const invite = String(process.env.DISCORD_INVITE_URL || "").trim();
         if (!invite) return res.status(500).send("DISCORD_INVITE_URL missing.");
         return res.redirect(302, invite);
       }
-}
+
+      const payUrl = new URL(`${base}/pay/subscribe`);
+      payUrl.searchParams.set("tier", tier);
+      payUrl.searchParams.set("discordUserId", String(user.id));
+
       return res.redirect(302, payUrl.toString());
+    } catch (e) {
+      console.log("OAUTH_CALLBACK_ERR:", e?.message || e);
+      return res.status(500).send("OAuth callback failed.");
     }
-
-    const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
-    if (!base) return res.status(500).send("PUBLIC_BASE_URL missing.");
-
-    const redirectUri = `${base}/auth/discord/callback`;
-
-    // Extend existing OAuth state (do NOT break tier)
-    const state = makeOAuthState({ tier: effectiveTier, ref });
-
-    const clientId = process.env.DISCORD_CLIENT_ID;
-    if (!clientId) return res.status(500).send("DISCORD_CLIENT_ID missing.");
-
-    const u = new URL("https://discord.com/api/oauth2/authorize");
-    u.searchParams.set("client_id", clientId);
-    u.searchParams.set("redirect_uri", redirectUri);
-    u.searchParams.set("response_type", "code");
-    u.searchParams.set("scope", "identify");
-    u.searchParams.set("state", state);
-
-    return res.redirect(302, u.toString());
-  } catch (e) {
-    console.log("OAUTH_START_ERR:", e?.message || e);
-    return res.status(500).send("OAuth start failed.");
-  }
-});
-
-// ✅ Discord OAuth callback: binds user id -> redirects to Paystack subscribe
-app.get("/auth/discord/callback", rateLimit, async (req, res) => {
-  try {
-    const code = String(req.query.code || "");
-    const state = String(req.query.state || "");
-    if (!code || !state) return res.status(400).send("Missing code/state.");
-
-    const payload = verifyOAuthState(state);
-    if (!payload) return res.status(400).send("Invalid or expired state.");
-
-    const tier = String(payload.tier || "").toUpperCase();
-    console.log("OAUTH_PAYLOAD:", payload);
-    const referrerId = /^\d{17,20}$/.test(String(payload.ref || "")) ? String(payload.ref) : "";
-
-    const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
-    const redirectUri = `${base}/auth/discord/callback`;
-
-    const token = await discordExchangeCodeForToken(code, redirectUri);
-    const user = await discordFetchUser(token.access_token);
-    // 🧷 Bind referral once (immutable). Safe no-op if invalid/duplicate/self.
-if (referrerId && user?.id && referrerId !== String(user.id)) {
-  try {
-    const bindRes = await mapInvite(String(user.id), referrerId); // memberId first, inviterId second
-        // ✅ Referral-only flow: after binding, send user to Discord invite (no Paystack)
-    const isRefFlow = String(payload.flow || "") === "ref";
-    if (isRefFlow) {
-      const invite = String(process.env.DISCORD_INVITE_URL || "").trim();
-      if (!invite) return res.status(500).send("DISCORD_INVITE_URL missing.");
-      return res.redirect(302, invite);
-    }
-
-    console.log("✅ REF_BIND_OK:", bindRes || "ok");
-  } catch (e) {
-    console.log("REF_BIND_ERR:", e?.message || e);
-  }
-}
-
-    const payUrl = new URL(`${base}/pay/subscribe`);
-    payUrl.searchParams.set("tier", tier);
-    payUrl.searchParams.set("discordUserId", String(user.id));
-
-    // 🔐 Store short-lived OAuth session (silent reuse)
-    res.cookie("tgt_oauth", {
-      discordUserId: String(user.id),
-      issuedAt: Date.now(),
-    }, {
-      httpOnly: true,
-      signed: true,
-      sameSite: "lax",
-      secure: true,
-      maxAge: 1000 * 60 * 60 * 24 * 7, // 7 days
-   });
-
-    return res.redirect(302, payUrl.toString());
-  } catch (e) {
-    console.log("OAUTH_CALLBACK_ERR:", e?.message || e);
-    return res.status(500).send("OAuth callback failed.");
-  }
-});
+  });
 
   // ✅ Plan-based subscribe (GET)
   app.get("/pay/subscribe", rateLimit, async (req, res) => {
@@ -768,77 +779,68 @@ if (referrerId && user?.id && referrerId !== String(user.id)) {
 
         let tier = String(meta?.tier || "").toUpperCase();
         let discordUserId = String(meta?.discordUserId || "").trim();
+
         console.log("PAYSTACK_META_IDS:", {
           tier: meta?.tier,
           discordUserId: meta?.discordUserId,
           customer: paid?.customer?.customer_code,
           subscription: paid?.subscription?.subscription_code,
         });
+
         const reference = String(
-          paid?.reference ||
-          event?.data?.reference ||
-          event?.data?.id ||
-          "-"
+          paid?.reference || event?.data?.reference || event?.data?.id || "-"
         ).trim();
 
         if (!tier || !discordUserId) {
-  // Fallback for subscription renewals where metadata may be missing:
-  // try mapping by subscription_code we stored on first payment.
-  const subCode =
-    paid?.subscription?.subscription_code ||
-    paid?.subscription_code ||
-    paid?.plan?.subscription_code ||
-    null;
+          // Fallback for subscription renewals where metadata may be missing:
+          // try mapping by subscription_code we stored on first payment.
+          const subCode =
+            paid?.subscription?.subscription_code ||
+            paid?.subscription_code ||
+            paid?.plan?.subscription_code ||
+            null;
 
-  if (!subCode) {
-    console.log("PAYSTACK_CHARGE_SUCCESS_MISSING_META_AND_SUBCODE:", meta);
-    return;
-  }
+          if (!subCode) {
+            console.log("PAYSTACK_CHARGE_SUCCESS_MISSING_META_AND_SUBCODE:", meta);
+            return;
+          }
 
-  try {
-    const { listAllSubscriptions } = require("../services/subscriptions");
-    const all = await listAllSubscriptions();
+          try {
+            const { listAllSubscriptions } = require("../services/subscriptions");
+            const all = await listAllSubscriptions();
 
-    const match = all.find(
-      (s) => String(s.paystack_subscription_code || "") === String(subCode)
-    );
+            const match = all.find(
+              (s) => String(s.paystack_subscription_code || "") === String(subCode)
+            );
 
-    if (!match?.discord_id) {
-      console.log("PAYSTACK_RENEWAL_NO_MATCH_FOR_SUBCODE:", subCode);
-      return;
-    }
+            if (!match?.discord_id) {
+              console.log("PAYSTACK_RENEWAL_NO_MATCH_FOR_SUBCODE:", subCode);
+              return;
+            }
 
-    // Set discordUserId from matched record
-    // ✅ IMPORTANT: only map for renewals when metadata discordUserId is missing
-    if (discordUserId) {
-      console.log("PAYSTACK_RENEWAL_SKIP_MAPPING_META_PRESENT:", discordUserId);
-      return;
-    }
+            // If metadata discordUserId present, don't remap
+            if (discordUserId) {
+              console.log("PAYSTACK_RENEWAL_SKIP_MAPPING_META_PRESENT:", discordUserId);
+              return;
+            }
 
-    const mappedDiscordUserId = String(match.discord_id).trim();
+            const mappedDiscordUserId = String(match.discord_id).trim();
+            const mappedTier = String(match.tier || "").toUpperCase();
 
-    // If tier missing, fall back to stored tier
-    const mappedTier = String(match.tier || "").toUpperCase();
+            if (!mappedTier) {
+              console.log("PAYSTACK_RENEWAL_MATCH_NO_TIER:", subCode, mappedDiscordUserId);
+              return;
+            }
 
-    if (!mappedTier) {
-      console.log("PAYSTACK_RENEWAL_MATCH_NO_TIER:", subCode, mappedDiscordUserId);
-      return;
-    }
+            console.log("✅ PAYSTACK_RENEWAL_MAPPED:", subCode, mappedDiscordUserId, mappedTier);
 
-    // overwrite locals safely
-    // eslint-disable-next-line no-unused-vars
-    // (we simply reassign via new vars then use them below)
-    console.log("✅ PAYSTACK_RENEWAL_MAPPED:", subCode, mappedDiscordUserId, mappedTier);
-
-    // IMPORTANT: replace the original variables by shadowing
-    // (keep minimal change—use these for the rest of the handler)
-    tier = mappedTier;
-    discordUserId = mappedDiscordUserId;
-  } catch (e) {
-    console.log("PAYSTACK_RENEWAL_MAP_ERR:", e?.message || e);
-    return;
-  }
-}
+            tier = mappedTier;
+            discordUserId = mappedDiscordUserId;
+          } catch (e) {
+            console.log("PAYSTACK_RENEWAL_MAP_ERR:", e?.message || e);
+            return;
+          }
+        }
 
         // 1) Roles
         try {
@@ -846,74 +848,74 @@ if (referrerId && user?.id && referrerId !== String(user.id)) {
           if (rolesMod?.revokePremiumRoles) await rolesMod.revokePremiumRoles(discordUserId);
           if (rolesMod?.grantRole) await rolesMod.grantRole(discordUserId, tier, reference);
           console.log(`✅ ROLE UPDATED: ${tier} -> ${discordUserId}`);
-          // 1.5) Prestige DM: receipt + Contract Gate button
-
-
         } catch (e) {
           console.log("ROLE_ASSIGN_ERR:", e?.message || e);
         }
 
         // 2) Subscription ledger (safe even if sync)
-try {
-  const { upsertSubscription } = require("../services/subscriptions");
+        try {
+          const { upsertSubscription } = require("../services/subscriptions");
 
-  const tierLc = String(tier || "").toLowerCase();
+          const tierLc = String(tier || "").toLowerCase();
+          const paidAtIso = paid?.paid_at || paid?.created_at || new Date().toISOString();
 
-  const paidAtIso = paid?.paid_at || paid?.created_at || new Date().toISOString();
+          // durations that match your tiers: Silver monthly, Gold quarterly, Diamond yearly
+          const { computeExpiryFrom } = require("../jobs/subscriptionMonitor");
+          const base = new Date(paidAtIso);
+          const expiresAtMs = computeExpiryFrom(tierLc, base).getTime();
 
-  // durations that match your tiers: Silver monthly, Gold quarterly, Diamond yearly
-  const { computeExpiryFrom } = require("../jobs/subscriptionMonitor");
-  const base = new Date(paidAtIso);
-  const expiresAtMs = computeExpiryFrom(tierLc, base).getTime();
+          await upsertSubscription(discordUserId, {
+            tier: tierLc,
+            status: "active",
+            expires_at: expiresAtMs,
+            paystack_subscription_code:
+              paid?.subscription?.subscription_code || paid?.subscription_code || null,
+            expired_notified_at: null,
+            reminders: { d3: false, h24: false },
+            last_paystack_ref: reference || null,
+          });
 
-  const isFirstTime = false; // keep false for now (we’ll handle properly in Step 6)
+          console.log("✅ SUBSCRIPTION UPSERT:", discordUserId, tierLc, expiresAtMs);
+        } catch (e) {
+          console.log("SUB_UPSERT_ERR:", e?.message || e);
+        }
 
-  await upsertSubscription(discordUserId, {
-    tier: tierLc,
-    status: "active",
-    expires_at: expiresAtMs,
-    paystack_subscription_code: paid?.subscription?.subscription_code || paid?.subscription_code || null,
-    expired_notified_at: null,
-    reminders: { d3: false, h24: false },
-    last_paystack_ref: reference || null,
-  });
+        // 3) Affiliate paid sale (first conversion only)
+        try {
+          const refs = require("../services/referrals");
 
-  // (Removed) enforcePremiumRole — not implemented. Roles are handled elsewhere.
+          const amountKobo = Number(paid?.amount || 0);
+          const amountGhs = amountKobo ? amountKobo / 100 : 0;
 
-  console.log("✅ SUBSCRIPTION UPSERT:", discordUserId, tierLc, expiresAtMs);
-} catch (e) {
-  console.log("SUB_UPSERT_ERR:", e?.message || e);
-}
+          const referrerId = await refs.getReferrerByInvite(discordUserId);
+          if (!referrerId) {
+            console.log("ℹ️ No referrer for this buyer (affiliate skipped).");
+            return;
+          }
 
-      // 3) Affiliate paid sale (first conversion only)
-try {
-  const refs = require("../services/referrals");
+          const r = await refs.bump("sale", {
+            referrerId,
+            memberId: discordUserId,
+            amountGhs,
+          });
 
-  const amountKobo = Number(paid?.amount || 0);
-  const amountGhs = amountKobo ? amountKobo / 100 : 0;
+          console.log("AFF_BUMP_RESULT:", r);
 
-  const referrerId = await refs.getReferrerByInvite(discordUserId);
-  if (!referrerId) {
-    console.log("ℹ️ No referrer for this buyer (affiliate skipped).");
-    return;
-  }
-
-  const r = await refs.bump("sale", {
-    referrerId,
-    memberId: discordUserId,
-    amountGhs,
-  });
-  
-  console.log("AFF_BUMP_RESULT:", r);
-
-  if (r?.ignored) {
-    console.log("ℹ️ Affiliate sale ignored (already converted):", discordUserId);
-  } else {
-    console.log("✅ AFFILIATE SALE CREDITED:", referrerId, "member=", discordUserId, "amountGhs=", amountGhs);
-  }
-} catch (e) {
-  console.log("AFFILIATE_CREDIT_ERR:", e?.message || e);
-}  
+          if (r?.ignored) {
+            console.log("ℹ️ Affiliate sale ignored (already converted):", discordUserId);
+          } else {
+            console.log(
+              "✅ AFFILIATE SALE CREDITED:",
+              referrerId,
+              "member=",
+              discordUserId,
+              "amountGhs=",
+              amountGhs
+            );
+          }
+        } catch (e) {
+          console.log("AFFILIATE_CREDIT_ERR:", e?.message || e);
+        }
 
         return;
       }
