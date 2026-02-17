@@ -5,12 +5,22 @@ const { getStats } = require("../../../services/referrals");
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID;
 const MOD_ROLE_ID = process.env.MOD_ROLE_ID;
 
+const { PermissionFlagsBits } = require("discord.js");
+
 function isStaff(member) {
   if (!member) return false;
-  return (
-    (ADMIN_ROLE_ID && member.roles.cache.has(ADMIN_ROLE_ID)) ||
-    (MOD_ROLE_ID && member.roles.cache.has(MOD_ROLE_ID))
-  );
+
+  // Allow server admins
+  if (member.permissions?.has?.(PermissionFlagsBits.Administrator)) return true;
+
+  // Allow your bot-defined staff roles (set these in Railway Variables)
+  const adminRoleId = String(process.env.ROLE_ADMIN_ID || "").trim();
+  const modRoleId = String(process.env.ROLE_MOD_ID || "").trim();
+
+  if (adminRoleId && member.roles.cache.has(adminRoleId)) return true;
+  if (modRoleId && member.roles.cache.has(modRoleId)) return true;
+
+  return false;
 }
 
 function monthKeyUTC() {

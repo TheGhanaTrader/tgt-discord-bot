@@ -7,6 +7,7 @@ const {
   ButtonBuilder,
   ButtonStyle,
 } = require("discord.js");
+const { PermissionFlagsBits } = require("discord.js");
 
 module.exports = {
   data: new SlashCommandBuilder()
@@ -14,9 +15,9 @@ module.exports = {
     .setDescription("Post the Contract Gate message (View + Accept)."),
 
   async execute(interaction) {
-    if (!interaction.memberPermissions?.has("Administrator")) {
-      return interaction.reply({ content: "Admin only.", ephemeral: true });
-    }
+    if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+  return interaction.reply({ content: "⛔ Staff only.", ephemeral: true });
+}
 
     const embed = new EmbedBuilder()
       .setTitle("📜 Contract Gate — Mandatory Acceptance")
