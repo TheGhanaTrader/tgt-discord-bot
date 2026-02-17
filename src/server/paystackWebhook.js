@@ -531,6 +531,7 @@ app.get("/auth/logout", rateLimit, (req, res) => {
 app.get("/auth/discord/start", rateLimit, async (req, res) => {
   try {
     const tier = String(req.query.tier || "").toUpperCase();
+    const isRefFlow = flow === "ref";
     const effectiveTier = tier || "SILVER"; // default when ?tier is missing (referral links)
     // 🔗 Optional referral id passed in URL: ?ref=REFERRER_DISCORD_ID
     const refRaw = String(req.query.ref || "").trim();
@@ -538,8 +539,12 @@ app.get("/auth/discord/start", rateLimit, async (req, res) => {
     const refC = req.signedCookies?.tgt_ref?.ref;
     const ref = refQ || (/^\d{17,20}$/.test(String(refC || "")) ? String(refC) : "");
 
-    const allowed = new Set(["SILVER", "GOLD", "DIAMOND"]);
-    if (!allowed.has(effectiveTier)) return res.status(400).send("Invalid tier.");
+        const allowed = new Set(["SILVER", "GOLD", "DIAMOND"]);
+    if (!isRefFlow) {
+      if (!allowed.has(effectiveTier)) {
+        return res.status(400).send("Invalid tier.");
+      }
+    }
 
     // 🔁 Silent OAuth reuse (skip Discord authorize if session exists)
     const sess = req.signedCookies?.tgt_oauth;
@@ -561,6 +566,12 @@ if (ref && String(sess.discordUserId) && ref !== String(sess.discordUserId)) {
   } catch (e) {
     console.log("REF_BIND_ERR(sess):", e?.message || e);
   }
+        // ✅ Referral-only flow: redirect to Discord, NOT Paystack
+      if (isRefFlow) {
+        const invite = String(process.env.DISCORD_INVITE_URL || "").trim();
+        if (!invite) return res.status(500).send("DISCORD_INVITE_URL missing.");
+        return res.redirect(302, invite);
+      }
 }
       return res.redirect(302, payUrl.toString());
     }
