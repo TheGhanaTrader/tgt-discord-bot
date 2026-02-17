@@ -117,6 +117,7 @@ function parseS3Locator(outPath) {
 async function handleContractAccept(interaction) {
   const member = interaction.member;
   const user = interaction.user;
+  console.log("CONTRACT_ACCEPT_CLICK:", { userId: user?.id, username: user?.username });
 
   // ✅ HARD STOP: already accepted => NO new PDF, NO DM, NO log
   try {
@@ -199,9 +200,11 @@ async function handleContractAccept(interaction) {
     // ✅ STEP 2: Count REFERRAL JOIN ONLY on contract acceptance (NOT on server join)
     try {
       const memberId = String(user.id);
+      console.log("REF_JOIN_CHECK_START:", { memberId });
 
       // ✅ Postgres referrals: async lookup
       const referrerId = await refs.getReferrerByInvite(memberId);
+      console.log("REF_JOIN_CHECK_REFERRER:", { memberId, referrerId });
 
       if (!referrerId) {
         // no mapping -> nothing to count
