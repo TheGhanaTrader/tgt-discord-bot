@@ -182,8 +182,6 @@ client.once(Events.ClientReady, async (c) => {
   startMonthlyScheduler(client);
   console.log("🛡️ Monthly scheduler hardening: ACTIVE");
 
-  startPaystackWebhookServer();
-
   const { startYouTubeRssPoster } = require("./jobs/youtubeRssPoster");
 startYouTubeRssPoster(client);
 
@@ -404,6 +402,9 @@ return interaction.reply({
 
 // ===== BOOT =====
 (async () => {
+  // ✅ Start Paystack webhook server immediately for Railway health checks
+  startPaystackWebhookServer();
+
   const commandsJSON = loadCommands();
   await registerCommands(commandsJSON);
   await client.login(TOKEN);
