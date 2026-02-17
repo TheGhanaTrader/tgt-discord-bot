@@ -432,6 +432,37 @@ app.get("/auth/logout", rateLimit, (req, res) => {
   }
 });
 
+// ✅ Referral link entry: sets cookie then starts referral-only OAuth bind flow
+app.get("/r", rateLimit, (req, res) => {
+  try {
+    const refRaw = String(req.query.ref || "").trim();
+    const ref = /^\d{17,20}$/.test(refRaw) ? refRaw : "";
+    if (!ref) return res.status(400).send("Invalid ref.");
+
+    // store in signed cookie so we can bind even if query is lost later
+    res.cookie(
+      "tgt_ref",
+      { ref, ts: Date.now() },
+      {
+        signed: true,
+        httpOnly: true,
+        sameSite: "lax",
+        secure: process.env.NODE_ENV === "production",
+        maxAge: 24 * 60 * 60 * 1000, // 24h
+      }
+    );
+
+    const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+    if (!base) return res.status(500).send("PUBLIC_BASE_URL missing.");
+
+    // send into referral-only OAuth flow (bind mapping) -> then redirect to Discord invite
+    return res.redirect(302, `${base}/auth/discord/start?flow=ref`);
+  } catch (e) {
+    console.log("REF_LINK_ERR:", e?.message || e);
+    return res.status(500).send("Referral start failed");
+  }
+});
+
   // ✅ Public Verify Page
   app.get("/verify", rateLimit, (req, res) => {
     res.setHeader("content-type", "text/html; charset=utf-8");
@@ -520,8 +551,9 @@ app.get("/auth/logout", rateLimit, (req, res) => {
   // ✅ Discord OAuth start: 1-click from public gate -> Discord identify -> auto-redirect to Paystack
 app.get("/auth/discord/start", rateLimit, async (req, res) => {
   try {
-    const tier = String(req.query.tier || "").toUpperCase();
+    const flow = String(req.query.flow || "").trim();
     const isRefFlow = flow === "ref";
+    const tier = String(req.query.tier || "").toUpperCase();
     const effectiveTier = tier || "SILVER"; // default when ?tier is missing (referral links)
     // 🔗 Optional referral id passed in URL: ?ref=REFERRER_DISCORD_ID
     const refRaw = String(req.query.ref || "").trim();
