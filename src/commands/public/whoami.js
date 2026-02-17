@@ -7,10 +7,11 @@ const {
 } = require("discord.js");
 const { getSubscription } = require("../../services/subscriptions");
 
-function formatDate(iso) {
-  if (!iso) return "—";
-  const d = new Date(iso);
-  return d.toUTCString().replace("GMT", "UTC");
+function formatDate(v) {
+  if (!v) return "—";
+  const n = Number(v);
+  const d = Number.isFinite(n) ? new Date(n) : new Date(String(v));
+  return isNaN(d.getTime()) ? "—" : d.toUTCString().replace("GMT", "UTC");
 }
 
 // Detect tier by checking the member's roles against TIERS[*].roleId
@@ -70,7 +71,7 @@ module.exports = {
     const member = await interaction.guild.members.fetch(interaction.user.id);
 
     const tierKey = getTierKeyFromMember(member, TIERS);
-    const sub = getSubscription(interaction.user.id);
+    const sub = await getSubscription(interaction.user.id);
 
     // Case 1: No role + no subscription record
     if (!tierKey && !sub) {
