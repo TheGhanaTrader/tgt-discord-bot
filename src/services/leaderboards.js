@@ -398,7 +398,7 @@ async function refreshLeaderboards(client) {
   // Archive after 7 days (keeps only current month in main)
   await archiveIfDue(client, db);
 
-  const stats = referrals.getStats(monthKey);
+  const stats = await referrals.getStats(monthKey);
 
   // Referral = joins (a), tie = sales (b) only for stable ordering
   const refRows = topNFromStats(stats, "joins", "sales", 10);

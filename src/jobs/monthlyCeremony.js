@@ -191,7 +191,7 @@ function buildPrestigeWinnersEmbed({ monthKey, winners }) {
 
 async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun }) {
   const monthKey = isValidYYYYMM(monthKeyOverride) ? monthKeyOverride : getMonthKey(nyDate());
-  const stats = getStats(monthKey);
+  const stats = await getStats(monthKey);
   const entries = Object.entries(stats);
   console.log("HONORS_DEBUG:", { monthKey, entries: entries.length, dryRun });
 

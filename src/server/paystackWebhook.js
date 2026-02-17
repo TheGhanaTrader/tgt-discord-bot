@@ -566,8 +566,8 @@ app.get("/auth/discord/start", rateLimit, async (req, res) => {
       // ✅ If referral link used but OAuth session exists, bind now
 if (ref && String(sess.discordUserId) && ref !== String(sess.discordUserId)) {
   try {
-    mapInvite(String(sess.discordUserId), ref); // memberId first, inviterId second
-    console.log("OAUTH_REUSE_BIND_ATTEMPTED");
+    const bindRes = await mapInvite(String(sess.discordUserId), ref); // memberId first, inviterId second
+    console.log("✅ OAUTH_REUSE_BIND_OK:", bindRes || "ok");
     res.clearCookie("tgt_ref");
 
   } catch (e) {
@@ -624,7 +624,8 @@ app.get("/auth/discord/callback", rateLimit, async (req, res) => {
     // 🧷 Bind referral once (immutable). Safe no-op if invalid/duplicate/self.
 if (referrerId && user?.id && referrerId !== String(user.id)) {
   try {
-    mapInvite(String(user.id), referrerId); // memberId first, inviterId second
+    const bindRes = await mapInvite(String(user.id), referrerId); // memberId first, inviterId second
+    console.log("✅ REF_BIND_OK:", bindRes || "ok");
   } catch (e) {
     console.log("REF_BIND_ERR:", e?.message || e);
   }
@@ -873,6 +874,8 @@ try {
     memberId: discordUserId,
     amountGhs,
   });
+  
+  console.log("AFF_BUMP_RESULT:", r);
 
   if (r?.ignored) {
     console.log("ℹ️ Affiliate sale ignored (already converted):", discordUserId);
