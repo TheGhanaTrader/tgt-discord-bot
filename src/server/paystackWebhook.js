@@ -767,7 +767,7 @@ if (referrerId && user?.id && referrerId !== String(user.id)) {
 
   try {
     const { listAllSubscriptions } = require("../services/subscriptions");
-    const all = listAllSubscriptions();
+    const all = await listAllSubscriptions();
 
     const match = all.find(
       (s) => String(s.paystack_subscription_code || "") === String(subCode)
@@ -838,7 +838,7 @@ try {
 
   const isFirstTime = false; // keep false for now (we’ll handle properly in Step 6)
 
-  upsertSubscription(discordUserId, {
+  await upsertSubscription(discordUserId, {
     tier: tierLc,
     status: "active",
     expires_at: expiresAtMs,
@@ -862,13 +862,13 @@ try {
   const amountKobo = Number(paid?.amount || 0);
   const amountGhs = amountKobo ? amountKobo / 100 : 0;
 
-  const referrerId = refs.getReferrerByInvite(discordUserId);
+  const referrerId = await refs.getReferrerByInvite(discordUserId);
   if (!referrerId) {
     console.log("ℹ️ No referrer for this buyer (affiliate skipped).");
     return;
   }
 
-  const r = refs.bump("sale", {
+  const r = await refs.bump("sale", {
     referrerId,
     memberId: discordUserId,
     amountGhs,
