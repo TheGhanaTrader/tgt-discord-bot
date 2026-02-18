@@ -4,7 +4,25 @@ const path = require("path");
 const os = require("os");
 const crypto = require("crypto");
 const QRCode = require("qrcode");
-const { createCanvas, loadImage } = require("canvas");
+const { createCanvas, loadImage, registerFont } = require("canvas");
+
+// ---------- Font bootstrap (Railway-safe; bypasses fontconfig) ----------
+try {
+  const candidates = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+  ];
+
+  for (const p of candidates) {
+    if (fs.existsSync(p)) {
+      // Register as "Georgia" so existing code using Georgia keeps the same look intent
+      registerFont(p, { family: "Georgia" });
+      break;
+    }
+  }
+} catch (e) {
+  console.log("FONT_REGISTER_FAIL:", e?.message || e);
+}
 
 // ---------- TEMP Paths (NO /data) ----------
 const TMP_DIR = path.join(os.tmpdir(), "tgt-certificates");
@@ -203,23 +221,23 @@ async function generateCertificatePNG({ username, userId, rank, reward, month, v
   ctx.restore();
 
   // ---------- Logo + watermark (safe) ----------
-  const logo = await getLogoImage();
-  if (logo) {
-    const w = 160;
-    const h = Math.round((logo.height / logo.width) * w);
-    ctx.save();
-    ctx.globalAlpha = 0.95;
-    ctx.drawImage(logo, Math.round(centerX - w / 2), 95, w, h);
-    ctx.restore();
+  // ---------- Logo watermark only (centered) ----------
+const logo = await getLogoImage();
+if (logo) {
+  const wmW = 520;
+  const wmH = Math.round((logo.height / logo.width) * wmW);
 
-    // watermark
-    const wmW = 520;
-    const wmH = Math.round((logo.height / logo.width) * wmW);
-    ctx.save();
-    ctx.globalAlpha = 0.10;
-    ctx.drawImage(logo, Math.round(centerX - wmW / 2), 420, wmW, wmH);
-    ctx.restore();
-  }
+  ctx.save();
+  ctx.globalAlpha = 0.10;
+  ctx.drawImage(
+    logo,
+    Math.round(centerX - wmW / 2),
+    Math.round(HEIGHT / 2 - wmH / 2),
+    wmW,
+    wmH
+  );
+  ctx.restore();
+}
 
   // ---------- Header ----------
   ctx.save();
