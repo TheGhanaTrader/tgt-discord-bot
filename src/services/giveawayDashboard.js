@@ -373,7 +373,7 @@ async function handleGiveawayInteractions(client, interaction) {
     if (q && q.isTextBased()) {
       const e = new EmbedBuilder()
         .setTitle("🎁 Giveaway Claim — Pending Review")
-        .setDescription(`Claim ID: \`${claimId}\`\nSerial: \`${serial}\``)
+        .setDescription(`Claim ID: \`${claimId}\`\nSerial: \`${issued.serial_code}\``)
         .addFields(
           { name: "Member", value: `<@${interaction.user.id}>`, inline: true },
           { name: "Email", value: email, inline: true },
@@ -401,7 +401,7 @@ async function handleGiveawayInteractions(client, interaction) {
     });
 
     await interaction.user.send(
-      `✅ Giveaway claim received.\nSerial: ${issued.serial_code}\nYou will be notified after staff review.`
+    `✅ Giveaway claim received.\nSerial: ${issued.serial_code}\nYou will be notified after staff review.`
     ).catch(() => null);
 
     return true;
