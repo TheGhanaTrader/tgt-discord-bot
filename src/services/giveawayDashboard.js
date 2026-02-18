@@ -396,6 +396,11 @@ async function handleGiveawayInteractions(client, interaction) {
   return false;
 }
 
+// ✅ Backward-compatible alias (keeps index.js imports stable)
+async function handleGiveawayDashboardInteractions(client, interaction) {
+  return handleGiveawayInteractions(client, interaction);
+}
+
 module.exports = {
   ensureGiveawayDashboard,
   handleGiveawayDashboardInteractions,
