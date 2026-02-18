@@ -319,7 +319,7 @@ async function handleGiveawayInteractions(client, interaction) {
     console.log("[GIVEAWAY_CLAIM] submit", { serialRaw, serialNorm, userId: interaction.user.id });
     const email = String(interaction.fields.getTextInputValue("email") || "").trim();
 
-    if (!serial || !email) {
+    if (!serialNorm || !email) {
       await interaction.reply({ content: "❌ Serial code and email are required.", ephemeral: true });
       return true;
     }
