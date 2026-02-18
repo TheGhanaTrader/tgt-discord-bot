@@ -243,14 +243,17 @@ client.on(Events.InteractionCreate, async (interaction) => {
   try {
     // 🔹 GIVEAWAY DASHBOARD (single handler)
     if (await handleGiveawayDashboardInteractions(client, interaction)) return;
-
-    // 🔹 FUNDED / PAYOUT
     if (await handleFundedInteractions(client, interaction)) return;
     if (await handlePayoutInteractions(client, interaction)) return;
 
     // Inject TGT context for BOTH buttons and slash commands
     attachTgtContext(interaction);
 
+    const guild = interaction.guild;
+    if (!guild) return interaction.reply({ content: "Use this inside the server.", ephemeral: true });
+    
+    const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+    
     // ...keep the rest of your existing interaction routing below unchanged...
   } catch (e) {
     console.error("[INTERACTIONS] crash:", e?.message || e);
@@ -280,10 +283,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
           });
         }
 
-        const guild = interaction.guild;
-        if (!guild) return interaction.reply({ content: "Use this inside the server.", ephemeral: true });
-
-        const member = await guild.members.fetch(interaction.user.id).catch(() => null);
         if (!member) return interaction.reply({ content: "Could not fetch member.", ephemeral: true });
 
         const hasVerified = member.roles.cache.has(VERIFIED_ROLE_ID);
