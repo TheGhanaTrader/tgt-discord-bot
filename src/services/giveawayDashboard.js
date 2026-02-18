@@ -318,7 +318,7 @@ function buildClaimModal() {
 
   const email = new TextInputBuilder()
     .setCustomId("email")
-    .setLabel("Email (required only for funded/prop account rewards)")
+    .setLabel("Email (required only for funded)")
     .setStyle(TextInputStyle.Short)
     .setRequired(false);
 
