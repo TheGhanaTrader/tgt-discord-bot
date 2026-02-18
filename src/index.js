@@ -390,9 +390,20 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!command) return interaction.reply({ content: "Unknown command.", ephemeral: true });
 
     await command.execute(interaction);
-  } catch (e) {
-    console.error("[INTERACTIONS] crash:", e?.message || e);
-  }
+    } catch (e) {
+  console.error("[INTERACTIONS] crash:", e?.message || e);
+
+  // ✅ Prevent "This interaction failed"
+  try {
+    if (interaction.deferred) {
+      await interaction.editReply({ content: "❌ Something went wrong. Try again." });
+    } else if (interaction.replied) {
+      await interaction.followUp({ content: "❌ Something went wrong. Try again.", ephemeral: true });
+    } else {
+      await interaction.reply({ content: "❌ Something went wrong. Try again.", ephemeral: true });
+    }
+  } catch (_) {}
+} 
 });
 
 // ===== BOOT =====
