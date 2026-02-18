@@ -39,6 +39,12 @@ const LOGO_URL = String(process.env.TGT_LOGO_URL || "").trim();
 const DASH_TITLE = "🎁 Prop Firm Giveaways Dashboard";
 
 // ---------------- Helpers ----------------
+function normalizeSerial(input) {
+  return String(input || "")
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, ""); // removes dashes/spaces/etc
+}
 function monthKeyUTC(d = new Date()) {
   const y = d.getUTCFullYear();
   const m = String(d.getUTCMonth() + 1).padStart(2, "0");
@@ -308,7 +314,8 @@ async function handleGiveawayInteractions(client, interaction) {
 
   // Modal: create pending claim + post to staff review queue
   if (interaction.isModalSubmit() && interaction.customId === "giveaway_claim_modal") {
-    const serial = String(interaction.fields.getTextInputValue("serial") || "").trim().toUpperCase();
+    const serialRaw = String(interaction.fields.getTextInputValue("serial") || "").trim();
+    const serialNorm = normalizeSerial(serialRaw);
     const email = String(interaction.fields.getTextInputValue("email") || "").trim();
 
     if (!serial || !email) {
@@ -318,9 +325,15 @@ async function handleGiveawayInteractions(client, interaction) {
 
     // Validate serial exists in issued table
     const issued = await pool
-      .query("SELECT serial_code, firm, account_size, month_key, year_key FROM public.prop_giveaway_issued WHERE serial_code=$1", [serial])
-      .then((r) => r.rows?.[0] || null)
-      .catch(() => null);
+  .query(
+    `SELECT serial_code, firm, account_size, month_key, year_key
+     FROM public.prop_giveaway_issued
+     WHERE UPPER(REGEXP_REPLACE(serial_code, '[^A-Za-z0-9]', '', 'g')) = $1
+     LIMIT 1`,
+    [serialNorm]
+  )
+  .then((r) => r.rows?.[0] || null)
+  .catch(() => null);
 
     if (!issued) {
       await interaction.reply({ content: "❌ Invalid serial code. Please check your certificate and try again.", ephemeral: true });
@@ -335,7 +348,7 @@ async function handleGiveawayInteractions(client, interaction) {
         `INSERT INTO public.prop_giveaway_claims
          (id, serial_code, claimant_user_id, email, status, created_at)
          VALUES ($1,$2,$3,$4,'pending',NOW())`,
-        [claimId, serial, interaction.user.id, email]
+        [claimId, issued.serial_code, interaction.user.id, email]
       )
       .then(() => true)
       .catch((e) => {
@@ -387,7 +400,7 @@ async function handleGiveawayInteractions(client, interaction) {
     });
 
     await interaction.user.send(
-      `✅ Giveaway claim received.\nSerial: ${serial}\nYou will be notified after staff review.`
+      `✅ Giveaway claim received.\nSerial: ${issued.serial_code}\nYou will be notified after staff review.`
     ).catch(() => null);
 
     return true;
