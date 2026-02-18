@@ -24,6 +24,19 @@ try {
   console.log("FONT_REGISTER_FAIL:", e?.message || e);
 }
 
+// ---------- Font bootstrap (repo-bundled; bypasses Railway fontconfig) ----------
+try {
+  const fontPath = path.join(process.cwd(), "assets", "fonts", "DejaVuSerif.ttf");
+  if (fs.existsSync(fontPath)) {
+    // Register as "Georgia" so existing Georgia typography stays unchanged
+    registerFont(fontPath, { family: "Georgia" });
+  } else {
+    console.log("FONT_FILE_MISSING:", fontPath);
+  }
+} catch (e) {
+  console.log("FONT_REGISTER_FAIL:", e?.message || e);
+}
+
 // ---------- TEMP Paths (NO /data) ----------
 const TMP_DIR = path.join(os.tmpdir(), "tgt-certificates");
 
