@@ -241,14 +241,21 @@ client.on("guildMemberAdd", async (member) => {
 // ===== INTERACTIONS =====
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // 🔹 FUNDED CERTIFICATES — MUST BE FIRST
+    // 🔹 GIVEAWAY DASHBOARD (single handler)
     if (await handleGiveawayDashboardInteractions(client, interaction)) return;
-    if (await handleFundedInteractions(client, interaction)) return;
+
+    // 🔹 FUNDED / PAYOUT
     if (await handleFundedInteractions(client, interaction)) return;
     if (await handlePayoutInteractions(client, interaction)) return;
 
     // Inject TGT context for BOTH buttons and slash commands
     attachTgtContext(interaction);
+
+    // ...keep the rest of your existing interaction routing below unchanged...
+  } catch (e) {
+    console.error("[INTERACTIONS] crash:", e?.message || e);
+  }
+});
 
     // =========================
     // ✅ BUTTONS
@@ -382,6 +389,7 @@ return interaction.reply({
     // =========================
     // ✅ SLASH COMMANDS
     // =========================
+    try {
     if (!interaction.isChatInputCommand()) return;
 
     const command = client.commands.get(interaction.commandName);
@@ -398,7 +406,6 @@ return interaction.reply({
       }
     } catch (_) {}
   }
-});
 
 // ===== BOOT =====
 (async () => {
