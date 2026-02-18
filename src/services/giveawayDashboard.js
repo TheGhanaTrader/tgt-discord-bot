@@ -8,9 +8,11 @@ const {
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  AttachmentBuilder,
 } = require("discord.js");
 const { Pool } = require("pg");
 const crypto = require("crypto");
+const fs = require("fs");
 
 // ✅ Certificate ledger is the source of truth for claim eligibility + owner (READ-ONLY)
 const { findCertificateByCode, findLegacyByCode } = require("./certificatesLedger");
@@ -31,6 +33,9 @@ const GIVEAWAY_DASHBOARD_CHANNEL_ID = String(process.env.GIVEAWAY_DASHBOARD_CHAN
 
 // Uses your existing staff queue (same as funded/payout)
 const REVIEW_QUEUE_ID = String(process.env.PROOF_REVIEW_QUEUE_CHANNEL_ID || "").trim();
+
+// ✅ Where delivered claims + certificate copy must be posted
+const VERIFIED_GIVEAWAYS_CHANNEL_ID = String(process.env.VERIFIED_GIVEAWAYS_CHANNEL_ID || "").trim();
 
 // Marker to identify the right pinned message
 const DASH_MARKER = "TGT_GIVEAWAY_DASHBOARD";
@@ -128,7 +133,60 @@ function staffDeliveredRow(claimId) {
   );
 }
 
+async function postDeliveredToVerifiedGiveawaysChannel(client, { claim, cert, code }) {
+  if (!VERIFIED_GIVEAWAYS_CHANNEL_ID) return;
+
+  const ch = await client.channels.fetch(VERIFIED_GIVEAWAYS_CHANNEL_ID).catch(() => null);
+  if (!ch || !ch.isTextBased()) return;
+
+  const rewardLabel = String(cert?.rewardLabel || "—").trim();
+  const firm = String(claim?.firm_name || "—").trim();
+  const method = String(claim?.fulfillment_method || "—").trim();
+  const voucherOrLink = String(claim?.voucher_code || "—").trim();
+  const instructions = String(claim?.staff_instructions || "—").trim();
+  const winnerEmail = String(claim?.fulfillment_email || claim?.email || "—").trim();
+
+  const e = new EmbedBuilder()
+    .setTitle("✅ Giveaway Delivered — Verified")
+    .setDescription(`Certificate Code: \`${code}\``)
+    .addFields(
+      { name: "Member", value: `<@${String(claim.claimant_user_id)}>` , inline: true },
+      { name: "Reward", value: rewardLabel || "—", inline: true },
+      { name: "Firm", value: firm || "—", inline: true },
+      { name: "Method", value: method || "—", inline: true },
+      { name: "Voucher / Link", value: voucherOrLink ? voucherOrLink.slice(0, 900) : "—", inline: false },
+      { name: "Instructions", value: instructions ? instructions.slice(0, 900) : "—", inline: false },
+      { name: "Winner Email", value: winnerEmail || "—", inline: false }
+    )
+    .setColor(0x2ecc71)
+    .setTimestamp(new Date());
+
+  if (LOGO_URL) e.setThumbnail(LOGO_URL);
+
+  // Best-effort attach certificate copy:
+  // - If cert.filePath is a URL, set it as image
+  // - If it’s a local path and exists, attach file
+  const fp = cert?.filePath ? String(cert.filePath) : "";
+  const isUrl = /^https?:\/\//i.test(fp);
+
+  if (isUrl) {
+    e.setImage(fp);
+    await ch.send({ embeds: [e] }).catch(() => null);
+    return;
+  }
+
+  if (fp && fs.existsSync(fp)) {
+    const att = new AttachmentBuilder(fp);
+    await ch.send({ embeds: [e], files: [att] }).catch(() => null);
+    return;
+  }
+
+  // If we can’t attach, still log the record (no crashes)
+  await ch.send({ embeds: [e] }).catch(() => null);
+}
+
 // ---------------- Totals ----------------
+// ✅ Counts are now COMPLETED (delivered), because you want dashboard to update after completion.
 async function computeGiveawayTotals() {
   const mkThis = monthKeyUTC();
   const yk = yearKeyUTC();
@@ -141,21 +199,23 @@ async function computeGiveawayTotals() {
   const lifetime = await q(
     `SELECT COUNT(*)::int AS cnt
      FROM public.prop_giveaway_claims
-     WHERE status='approved'`,
+     WHERE delivered_at IS NOT NULL`,
     []
   );
 
   const ytd = await q(
     `SELECT COUNT(*)::int AS cnt
      FROM public.prop_giveaway_claims
-     WHERE status='approved' AND EXTRACT(YEAR FROM created_at) = $1`,
+     WHERE delivered_at IS NOT NULL
+       AND EXTRACT(YEAR FROM delivered_at) = $1`,
     [Number(yk)]
   );
 
   const thisMonth = await q(
     `SELECT COUNT(*)::int AS cnt
      FROM public.prop_giveaway_claims
-     WHERE status='approved' AND TO_CHAR(created_at AT TIME ZONE 'UTC','YYYY-MM') = $1`,
+     WHERE delivered_at IS NOT NULL
+       AND TO_CHAR(delivered_at AT TIME ZONE 'UTC','YYYY-MM') = $1`,
     [mkThis]
   );
 
@@ -183,13 +243,13 @@ function giveawayDashboardEmbed(t) {
     .setDescription(
       [
         "Claims are verified using **certificate verification codes** (same as `/verifycert`).",
-        "Staff approvals + fulfillment are logged for auditability.",
+        "Dashboard totals update after **delivery is confirmed**.",
       ].join("\n")
     )
     .addFields(
-      { name: "📅 This Month", value: `• **Approved Claims:** **${t.monthCnt}**`, inline: true },
-      { name: "📈 Year-to-Date", value: `• **Approved Claims:** **${t.ytdCnt}**`, inline: true },
-      { name: "🏛️ Lifetime", value: `• **Approved Claims:** **${t.lifetimeCnt}**`, inline: true },
+      { name: "📅 This Month", value: `• **Delivered Claims:** **${t.monthCnt}**`, inline: true },
+      { name: "📈 Year-to-Date", value: `• **Delivered Claims:** **${t.ytdCnt}**`, inline: true },
+      { name: "🏛️ Lifetime", value: `• **Delivered Claims:** **${t.lifetimeCnt}**`, inline: true },
       { name: "🛡️ Operations", value: `• **Pending Claims:** **${t.pendingCnt}**`, inline: false }
     )
     .setFooter({ text: `The Ghana Trader Desk • Audited Impact • ${DASH_MARKER}` })
@@ -417,11 +477,10 @@ async function handleGiveawayInteractions(client, interaction) {
       const email = String(interaction.fields.getTextInputValue("email") || "").trim();
 
       if (!claimId || !email) {
-        await interaction.reply({ content: "❌ Email is required.", ephemeral: true });
+        await interaction.reply({ content: "❌ Email is required.", ephemeral: true }).catch(() => null);
         return true;
       }
 
-      // Load claim, ensure approved, ensure owner matches
       const claim = await pool
         .query(
           `SELECT id, claimant_user_id, status, firm_name, fulfillment_method, voucher_code, staff_instructions, serial_code
@@ -434,21 +493,20 @@ async function handleGiveawayInteractions(client, interaction) {
         .catch(() => null);
 
       if (!claim) {
-        await interaction.reply({ content: "❌ Claim not found.", ephemeral: true });
+        await interaction.reply({ content: "❌ Claim not found.", ephemeral: true }).catch(() => null);
         return true;
       }
 
       if (String(claim.claimant_user_id) !== String(interaction.user.id)) {
-        await interaction.reply({ content: "❌ This fulfillment link is not for your account.", ephemeral: true });
+        await interaction.reply({ content: "❌ This fulfillment link is not for your account.", ephemeral: true }).catch(() => null);
         return true;
       }
 
       if (String(claim.status) !== "approved") {
-        await interaction.reply({ content: "⚠️ This claim is not approved yet.", ephemeral: true });
+        await interaction.reply({ content: "⚠️ This claim is not approved yet.", ephemeral: true }).catch(() => null);
         return true;
       }
 
-      // Save fulfillment email
       await pool
         .query(
           `UPDATE public.prop_giveaway_claims
@@ -458,7 +516,6 @@ async function handleGiveawayInteractions(client, interaction) {
         )
         .catch(() => null);
 
-      // Post to staff queue: Fulfillment Ready
       const q = await client.channels.fetch(REVIEW_QUEUE_ID).catch(() => null);
       if (q && q.isTextBased()) {
         const e = new EmbedBuilder()
@@ -484,7 +541,7 @@ async function handleGiveawayInteractions(client, interaction) {
       await interaction.reply({
         content: "✅ Submitted. Staff will complete fulfillment and confirm delivery.",
         ephemeral: true,
-      });
+      }).catch(() => null);
 
       return true;
     }
@@ -497,7 +554,7 @@ async function handleGiveawayInteractions(client, interaction) {
     const email = String(interaction.fields.getTextInputValue("email") || "").trim();
 
     if (!code) {
-      await interaction.reply({ content: "❌ Certificate code is required.", ephemeral: true });
+      await interaction.reply({ content: "❌ Certificate code is required.", ephemeral: true }).catch(() => null);
       return true;
     }
 
@@ -509,7 +566,7 @@ async function handleGiveawayInteractions(client, interaction) {
       await interaction.reply({
         content: "❌ This is a legacy certificate code and cannot be claimed via the dashboard. Please contact staff.",
         ephemeral: true,
-      });
+      }).catch(() => null);
       return true;
     }
 
@@ -517,17 +574,16 @@ async function handleGiveawayInteractions(client, interaction) {
       await interaction.reply({
         content: "❌ Invalid certificate code. Please check the code on your certificate and try again.",
         ephemeral: true,
-      });
+      }).catch(() => null);
       return true;
     }
 
-    // Strict owner check
     if (String(cert.userId || "") !== String(interaction.user.id || "")) {
       await interaction.reply({
         content:
           "❌ Claim rejected. This certificate was issued to **another member**.\nOnly the original winner can submit this claim.",
         ephemeral: true,
-      });
+      }).catch(() => null);
       return true;
     }
 
@@ -539,7 +595,7 @@ async function handleGiveawayInteractions(client, interaction) {
       await interaction.reply({
         content: "❌ Email is required for funded/prop account rewards. Please submit again with your email.",
         ephemeral: true,
-      });
+      }).catch(() => null);
       return true;
     }
 
@@ -565,15 +621,14 @@ async function handleGiveawayInteractions(client, interaction) {
         content:
           "⚠️ Already submitted. This certificate code has already been submitted/processed.\nIf you believe this is an error, contact staff.",
         ephemeral: true,
-      });
+      }).catch(() => null);
       return true;
     }
     if (ok === null) {
-      await interaction.reply({ content: "❌ Could not create claim. Try again.", ephemeral: true });
+      await interaction.reply({ content: "❌ Could not create claim. Try again.", ephemeral: true }).catch(() => null);
       return true;
     }
 
-    // Staff review post
     const q = await client.channels.fetch(REVIEW_QUEUE_ID).catch(() => null);
     if (q && q.isTextBased()) {
       const e = new EmbedBuilder()
@@ -603,7 +658,7 @@ async function handleGiveawayInteractions(client, interaction) {
     await interaction.reply({
       content: "✅ Claim submitted for staff review. You will be notified after approval or rejection.",
       ephemeral: true,
-    });
+    }).catch(() => null);
 
     await interaction.user
       .send(
@@ -628,34 +683,31 @@ async function handleGiveawayInteractions(client, interaction) {
 
     if (!isApprove && !isReject && !isDelivered) return false;
 
-// 🔑 extract claimId FIRST
-const claimId = id.split(":")[1];
-if (!claimId) {
-  if (isApprove) {
-    await interaction
-      .reply({ content: "❌ Invalid claim id.", ephemeral: true })
-      .catch(() => null);
-  } else {
+    const claimId = id.split(":")[1];
+    if (!claimId) {
+      if (isApprove) {
+        await interaction.reply({ content: "❌ Invalid claim id.", ephemeral: true }).catch(() => null);
+      } else {
+        await interaction.deferReply({ ephemeral: true }).catch(() => null);
+        await interaction.editReply("❌ Invalid claim id.").catch(() => null);
+      }
+      return true;
+    }
+
+    // ✅ APPROVE: modal must be FIRST response (NO defer)
+    if (isApprove) {
+      await interaction.showModal(buildStaffApproveModal(claimId));
+      return true;
+    }
+
+    // Reject / Delivered → safe to defer
     await interaction.deferReply({ ephemeral: true }).catch(() => null);
-    await interaction.editReply("❌ Invalid claim id.").catch(() => null);
-  }
-  return true;
-}
-
-// ✅ APPROVE: modal must be FIRST response (NO defer)
-if (isApprove) {
-  await interaction.showModal(buildStaffApproveModal(claimId));
-  return true;
-}
-
-// ❌ Reject / ✅ Delivered → safe to defer
-await interaction.deferReply({ ephemeral: true }).catch(() => null);
 
     // Delivered action
     if (isDelivered) {
       const claim = await pool
         .query(
-          `SELECT id, status, delivered_at
+          `SELECT id, serial_code, claimant_user_id, status, delivered_at, firm_name, fulfillment_method, voucher_code, staff_instructions, fulfillment_email, email
            FROM public.prop_giveaway_claims
            WHERE id=$1
            LIMIT 1`,
@@ -688,14 +740,37 @@ await interaction.deferReply({ ephemeral: true }).catch(() => null);
         )
         .catch(() => null);
 
-      await interaction.editReply("✅ Marked delivered.").catch(() => null);
+      // ✅ refresh dashboard counts AFTER completion
+      await ensureGiveawayDashboard(client).catch(() => null);
+
+      // ✅ log certificate copy + details to VERIFIED_GIVEAWAYS_CHANNEL_ID
+      const code = normalizeSerial(claim.serial_code);
+      const cert = await safeFetchCertByCode(code);
+      if (cert && !cert.legacy) {
+        await postDeliveredToVerifiedGiveawaysChannel(client, { claim, cert, code }).catch(() => null);
+      }
+
+      // ✅ DM winner delivered message
+      const user = await client.users.fetch(String(claim.claimant_user_id)).catch(() => null);
+      if (user) {
+        const method = String(claim.fulfillment_method || "").toUpperCase();
+        const firm = String(claim.firm_name || "the firm");
+        const msg =
+          method === "VOUCHER"
+            ? `🎉 **Congratulations — Delivered!**\nYour giveaway reward has been delivered.\nFirm: **${firm}**\nIf a voucher/link was provided, follow the instructions you received and proceed.\n\n— The Ghana Trader Desk`
+            : `🎉 **Congratulations — Delivered!**\nYour giveaway reward has been delivered.\nFirm: **${firm}**\nIf this was a CREDIT method, your account should be credited after staff processing.\n\n— The Ghana Trader Desk`;
+
+        await user.send(msg).catch(() => null);
+      }
+
+      await interaction.editReply("✅ Marked delivered (dashboard updated + logged).").catch(() => null);
       return true;
     }
 
-    // Load claim
+    // Load claim (for reject)
     const claim = await pool
       .query(
-        `SELECT id, serial_code, claimant_user_id, email, status, firm_name, fulfillment_method, voucher_code, staff_instructions, fulfillment_email
+        `SELECT id, serial_code, claimant_user_id, status
          FROM public.prop_giveaway_claims
          WHERE id=$1
          LIMIT 1`,
@@ -715,15 +790,14 @@ await interaction.deferReply({ ephemeral: true }).catch(() => null);
     }
 
     const code = normalizeSerial(claim.serial_code);
-
     const cert = await safeFetchCertByCode(code);
+
     if (!cert || cert.legacy) {
       await pool.query(`UPDATE public.prop_giveaway_claims SET status='rejected' WHERE id=$1`, [claimId]).catch(() => null);
       await interaction.editReply("❌ Certificate not found or legacy. Claim rejected.").catch(() => null);
       return true;
     }
 
-    // Strict owner re-check
     if (String(cert.userId || "") !== String(claim.claimant_user_id || "")) {
       await pool.query(`UPDATE public.prop_giveaway_claims SET status='rejected' WHERE id=$1`, [claimId]).catch(() => null);
       await interaction.editReply("❌ Owner mismatch detected. Claim rejected and logged.").catch(() => null);
@@ -750,10 +824,6 @@ await interaction.deferReply({ ephemeral: true }).catch(() => null);
       return true;
     }
 
-    // Approve clicked -> open staff modal (fulfillment details)
-    await interaction.editReply("✅ Opening approval form...").catch(() => null);
-    await interaction.followUp({ content: "Fill the approval form to finalize.", ephemeral: true }).catch(() => null);
-    await interaction.showModal(buildStaffApproveModal(claimId)).catch(() => null);
     return true;
   }
 
@@ -772,20 +842,19 @@ await interaction.deferReply({ ephemeral: true }).catch(() => null);
     const instructions = String(interaction.fields.getTextInputValue("instructions") || "").trim();
 
     if (!firm || !methodRaw || !voucher || !instructions) {
-      await interaction.reply({ content: "❌ All fields are required.", ephemeral: true });
+      await interaction.reply({ content: "❌ All fields are required.", ephemeral: true }).catch(() => null);
       return true;
     }
 
     const method = methodRaw === "VOUCHER" ? "VOUCHER" : methodRaw === "CREDIT" ? "CREDIT" : null;
     if (!method) {
-      await interaction.reply({ content: "❌ Method must be VOUCHER or CREDIT.", ephemeral: true });
+      await interaction.reply({ content: "❌ Method must be VOUCHER or CREDIT.", ephemeral: true }).catch(() => null);
       return true;
     }
 
-    // Load claim fresh (must still be pending)
     const claim = await pool
       .query(
-        `SELECT id, serial_code, claimant_user_id, email, status
+        `SELECT id, serial_code, claimant_user_id, status
          FROM public.prop_giveaway_claims
          WHERE id=$1
          LIMIT 1`,
@@ -795,12 +864,12 @@ await interaction.deferReply({ ephemeral: true }).catch(() => null);
       .catch(() => null);
 
     if (!claim) {
-      await interaction.reply({ content: "❌ Claim not found.", ephemeral: true });
+      await interaction.reply({ content: "❌ Claim not found.", ephemeral: true }).catch(() => null);
       return true;
     }
 
     if (String(claim.status) !== "pending") {
-      await interaction.reply({ content: "⚠️ This claim has already been processed.", ephemeral: true });
+      await interaction.reply({ content: "⚠️ This claim has already been processed.", ephemeral: true }).catch(() => null);
       return true;
     }
 
@@ -809,22 +878,19 @@ await interaction.deferReply({ ephemeral: true }).catch(() => null);
 
     if (!cert || cert.legacy) {
       await pool.query(`UPDATE public.prop_giveaway_claims SET status='rejected' WHERE id=$1`, [claimId]).catch(() => null);
-      await interaction.reply({ content: "❌ Certificate not found/legacy. Claim rejected.", ephemeral: true });
+      await interaction.reply({ content: "❌ Certificate not found/legacy. Claim rejected.", ephemeral: true }).catch(() => null);
       return true;
     }
 
-    // Owner re-check
     if (String(cert.userId || "") !== String(claim.claimant_user_id || "")) {
       await pool.query(`UPDATE public.prop_giveaway_claims SET status='rejected' WHERE id=$1`, [claimId]).catch(() => null);
-      await interaction.reply({ content: "❌ Owner mismatch detected. Claim rejected.", ephemeral: true });
+      await interaction.reply({ content: "❌ Owner mismatch detected. Claim rejected.", ephemeral: true }).catch(() => null);
       return true;
     }
 
     const rewardLabel = String(cert.rewardLabel || "").trim();
-    const funded = isFundedReward(rewardLabel);
     const premiumTier = parsePremiumTier(rewardLabel);
 
-    // Premium role grant (upgrade-only, otherwise skip)
     let roleAction = "none";
     if (premiumTier) {
       const targetRoleId = roleIdForTier(premiumTier);
@@ -855,7 +921,6 @@ await interaction.deferReply({ ephemeral: true }).catch(() => null);
       }
     }
 
-    // Approve + store fulfillment assignment
     await pool
       .query(
         `UPDATE public.prop_giveaway_claims
@@ -871,7 +936,6 @@ await interaction.deferReply({ ephemeral: true }).catch(() => null);
       )
       .catch(() => null);
 
-    // DM winner with stage2 button
     const user = await client.users.fetch(String(claim.claimant_user_id)).catch(() => null);
     if (user) {
       const methodLine =
@@ -879,8 +943,7 @@ await interaction.deferReply({ ephemeral: true }).catch(() => null);
           ? `**Voucher/Link:** ${voucher}`
           : `**Affiliate Link / Tracking:** ${voucher}`;
 
-      const extraRole =
-        premiumTier ? `\n**Role:** ${roleAction.replace(/_/g, " ")}` : "";
+      const extraRole = premiumTier ? `\n**Role:** ${roleAction.replace(/_/g, " ")}` : "";
 
       const msg = [
         "✅ **Claim Approved — Next Step Required**",
@@ -906,7 +969,7 @@ await interaction.deferReply({ ephemeral: true }).catch(() => null);
       await user.send({ content: msg, components: [row] }).catch(() => null);
     }
 
-    await interaction.reply({ content: "✅ Approved + fulfillment assigned.", ephemeral: true });
+    await interaction.reply({ content: "✅ Approved + fulfillment assigned.", ephemeral: true }).catch(() => null);
     return true;
   }
 
