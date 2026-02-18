@@ -33,7 +33,6 @@ function decodeEntities(input) {
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
-    .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
     .replace(/&#x2F;/g, "/");
@@ -131,35 +130,55 @@ async function fetchWithTimeout(url, ms = 9000) {
 
 // -------------------- RSS/Atom fallback sources --------------------
 
-// 1) RSSHub (best fallback)
+// RSSHub route patterns for Twitter/X vary by deployment/version.
+// We'll try a small list and use the first that works.
+function rsshubCandidateUrls(base, username) {
+  const u = encodeURIComponent(username);
+
+  return [
+    // Common older route
+    `${base}/twitter/user/${u}`,
+
+    // Common route name used by many RSSHub builds
+    `${base}/x/user/${u}`,
+
+    // Some builds use /twitter/profile
+    `${base}/twitter/profile/${u}`,
+
+    // Some builds use /twitter/status/user
+    `${base}/twitter/status/user/${u}`,
+  ];
+}
+
 async function getLatestViaRssHub(username) {
   const u = cleanUsername(username);
   if (!u) return null;
 
   const base = _rsshubBase;
-  const url = `${base}/twitter/user/${encodeURIComponent(u)}`;
 
-  // log only when we actually attempt RSSHub
-  console.log("🔎 X_RSSHUB_FETCH:", url);
+  for (const url of rsshubCandidateUrls(base, u)) {
+    console.log("🔎 X_RSSHUB_FETCH:", url);
 
-  try {
-    const r = await fetchWithTimeout(url, 10000);
-    if (!r.ok || !r.text) {
-      console.log("⚠️ X_RSSHUB_BAD_RESPONSE:", r.status);
-      return null;
+    try {
+      const r = await fetchWithTimeout(url, 10000);
+      if (!r.ok || !r.text) {
+        console.log("⚠️ X_RSSHUB_BAD_RESPONSE:", r.status, url);
+        continue;
+      }
+
+      const parsed = parseFeed(r.text);
+      if (parsed && parsed.id) return parsed;
+
+      console.log("⚠️ X_RSSHUB_PARSE_FAILED:", url);
+    } catch (e) {
+      console.log("⚠️ X_RSSHUB_FETCH_FAILED:", e?.message || e, url);
     }
-    const parsed = parseFeed(r.text);
-    if (parsed && parsed.id) return parsed;
-
-    console.log("⚠️ X_RSSHUB_PARSE_FAILED");
-    return null;
-  } catch (e) {
-    console.log("⚠️ X_RSSHUB_FETCH_FAILED:", e?.message || e);
-    return null;
   }
+
+  return null;
 }
 
-// 2) Twiiit (backup only)
+// Twiiit (backup only)
 async function getLatestViaTwiiit(username) {
   const u = cleanUsername(username);
   if (!u) return null;
@@ -219,7 +238,7 @@ async function getLatestTweetByUsername(username) {
     console.log("⚠️ X_API_READ_FAILED (fallback to RSS):", e?.message || e);
   }
 
-  // 2) RSSHub fallback (we must see logs now)
+  // 2) RSSHub fallback (route autodetect)
   const rh = await getLatestViaRssHub(u);
   if (rh?.id) return rh;
 
