@@ -14,6 +14,9 @@ const { Pool } = require("pg");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
+const os = require("os");
+const path = require("path");
+const { generateCertificatePNG } = require("../utils/certificateGenerator");
 
 // ✅ Certificate ledger is the source of truth for claim eligibility + owner (READ-ONLY)
 const { findCertificateByCode, findLegacyByCode } = require("./certificatesLedger");
@@ -109,6 +112,15 @@ function fmtMoneyUSD(n) {
   if (abs >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`;
   if (abs >= 1_000) return `$${(v / 1_000).toFixed(2)}K`;
   return `$${Math.round(v).toLocaleString("en-US")}`;
+}
+function parseFundedAmountUSD(label) {
+  const s = String(label || "").toUpperCase();
+  // matches 10K, 25K, 50K, 100K, etc
+  const m = s.match(/(\d+)\s*K/);
+  if (!m) return 0;
+  const k = Number(m[1]);
+  if (!Number.isFinite(k)) return 0;
+  return k * 1000;
 }
 
 // Parse funded size from label like "25K Funded Account" -> 25000
@@ -223,6 +235,52 @@ async function buildCertificateAttachment(cert, code) {
   // If nothing: no file
   return { files: [], imageUrl: null };
 }
+async function buildCertificateAttachment(cert, fallbackCode) {
+  // Returns: { files: [AttachmentBuilder], imageUrl: string|null }
+  // Never throws (caller already catches, but we keep it safe)
+  try {
+    const fp = cert?.filePath ? String(cert.filePath) : "";
+    const code = String(cert?.code || fallbackCode || "").trim();
+
+    // 1) If stored filePath is a URL, use embed image
+    if (/^https?:\/\//i.test(fp)) {
+      return { files: [], imageUrl: fp };
+    }
+
+    // 2) If stored filePath exists on disk, attach it
+    if (fp && fs.existsSync(fp)) {
+      return { files: [new AttachmentBuilder(fp)], imageUrl: null };
+    }
+
+    // 3) If file is missing (Railway restart/ephemeral FS), REGENERATE and attach
+    // NOTE: this requires generateCertificatePNG to be imported in this file.
+    const regen = await generateCertificatePNG({
+      username: cert?.username || "member",
+      userId: cert?.userId || null,
+      rank: cert?.rankLabel || "Winner",
+      reward: cert?.rewardLabel || "—",
+      month: cert?.monthKey || "—",
+      verificationCode: code || fallbackCode,
+    });
+
+    const regenPath = regen?.filePath ? String(regen.filePath) : "";
+    if (regenPath && fs.existsSync(regenPath)) {
+      const file = new AttachmentBuilder(regenPath);
+
+      // Optional cleanup: delete temp file after sending
+      // (we cannot delete AFTER send here because send happens outside,
+      // but we can still delete safely on next cycle if you want).
+      // For now, keep it simple and stable.
+
+      return { files: [file], imageUrl: null };
+    }
+
+    return { files: [], imageUrl: null };
+  } catch (_) {
+    return { files: [], imageUrl: null };
+  }
+}
+
 
 async function postDeliveredToVerifiedGiveawaysChannel(client, { claim, cert, code }) {
   if (!VERIFIED_GIVEAWAYS_CHANNEL_ID) return;
