@@ -316,6 +316,7 @@ async function handleGiveawayInteractions(client, interaction) {
   if (interaction.isModalSubmit() && interaction.customId === "giveaway_claim_modal") {
     const serialRaw = String(interaction.fields.getTextInputValue("serial") || "").trim();
     const serialNorm = normalizeSerial(serialRaw);
+    console.log("[GIVEAWAY_CLAIM] submit", { serialRaw, serialNorm, userId: interaction.user.id });
     const email = String(interaction.fields.getTextInputValue("email") || "").trim();
 
     if (!serial || !email) {
