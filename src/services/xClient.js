@@ -33,7 +33,7 @@ function decodeEntities(input) {
 }
 
 function extractFirstTag(xml, tag) {
-  const re = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i");
+  const re = new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, "i");
   const m = xml.match(re);
   return m ? m[1].trim() : "";
 }
@@ -45,7 +45,7 @@ function extractFirstCdataOrText(xml, tag) {
   return (c ? c[1] : block).trim();
 }
 
-function parseFirstItem(xml) {
+function parseFirstRssItem(xml) {
   const itemMatch = xml.match(/<item>([\s\S]*?)<\/item>/i);
   if (!itemMatch) return null;
 
@@ -68,6 +68,38 @@ function parseFirstItem(xml) {
   return { id, text, url: link || null };
 }
 
+function parseFirstAtomEntry(xml) {
+  const entryMatch = xml.match(/<entry>([\s\S]*?)<\/entry>/i);
+  if (!entryMatch) return null;
+
+  const entryXml = entryMatch[1];
+
+  // Atom commonly uses <id>, <title>, <content>, and link as <link href="..."/>
+  const idRaw = extractFirstCdataOrText(entryXml, "id");
+  const titleRaw = extractFirstCdataOrText(entryXml, "title");
+  const contentRaw = extractFirstCdataOrText(entryXml, "content") || extractFirstCdataOrText(entryXml, "summary");
+
+  const hrefMatch = entryXml.match(/<link[^>]+href="([^"]+)"/i);
+  const link = hrefMatch ? hrefMatch[1] : "";
+
+  const title = decodeEntities(stripHtml(titleRaw));
+  const content = decodeEntities(stripHtml(contentRaw));
+
+  const text = (content && content.length >= title.length ? content : title).trim();
+
+  const idMatch = String(link || idRaw || "").match(/status\/(\d+)/i);
+  const id = idMatch
+    ? idMatch[1]
+    : (String(idRaw || link || "").trim() || "").slice(0, 80);
+
+  return { id, text, url: link || null };
+}
+
+function parseFeed(xml) {
+  // Try RSS first, then Atom
+  return parseFirstRssItem(xml) || parseFirstAtomEntry(xml) || null;
+}
+
 async function fetchWithTimeout(url, ms = 9000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
@@ -75,12 +107,12 @@ async function fetchWithTimeout(url, ms = 9000) {
     const res = await fetch(url, {
       method: "GET",
       signal: ctrl.signal,
-      redirect: "follow", // IMPORTANT: follows twiiit -> nitter redirects
+      redirect: "follow",
       headers: {
         "user-agent":
           "Mozilla/5.0 (compatible; TheGhanaTraderDeskBot/1.0; +https://example.invalid)",
         accept:
-          "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
+          "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
       },
     });
     const text = await res.text().catch(() => "");
@@ -90,8 +122,7 @@ async function fetchWithTimeout(url, ms = 9000) {
   }
 }
 
-// Twiiit is a redirecting proxy to a working Nitter instance RSS
-// /<user>/rss redirects to an online instance RSS feed. :contentReference[oaicite:2]{index=2}
+// -------------------- RSS/Atom fallback sources --------------------
 async function getLatestViaTwiiit(username) {
   const u = cleanUsername(username);
   if (!u) return null;
@@ -103,7 +134,8 @@ async function getLatestViaTwiiit(username) {
       console.log("⚠️ X_RSS_TWIIIT_BAD_RESPONSE:", r.status);
       return null;
     }
-    const parsed = parseFirstItem(r.text);
+
+    const parsed = parseFeed(r.text);
     if (parsed && parsed.id) return parsed;
 
     console.log("⚠️ X_RSS_TWIIIT_PARSE_FAILED");
@@ -115,7 +147,6 @@ async function getLatestViaTwiiit(username) {
 }
 
 function getNitterInstances() {
-  // Optional override: comma-separated
   const env = String(process.env.NITTER_INSTANCES || "").trim();
   if (env) {
     return env
@@ -126,8 +157,6 @@ function getNitterInstances() {
       .map((s) => s.replace(/\/+$/, ""));
   }
 
-  // Expanded list (community-maintained lists exist, but instances change often)
-  // Keeping a few here as backup only. :contentReference[oaicite:3]{index=3}
   return [
     "https://nitter.blahaj.land",
     "https://nitter.batsense.net",
@@ -140,7 +169,7 @@ function getNitterInstances() {
   ];
 }
 
-async function getLatestViaNitterRss(username) {
+async function getLatestViaNitterFeed(username) {
   const u = cleanUsername(username);
   if (!u) return null;
 
@@ -149,13 +178,12 @@ async function getLatestViaNitterRss(username) {
     const url = `${base}/${encodeURIComponent(u)}/rss`;
     try {
       const r = await fetchWithTimeout(url, 9000);
-      if (!r.ok || !r.text) {
-        continue;
-      }
-      const parsed = parseFirstItem(r.text);
+      if (!r.ok || !r.text) continue;
+
+      const parsed = parseFeed(r.text);
       if (parsed && parsed.id) return parsed;
     } catch {
-      // try next instance
+      // try next
     }
   }
   return null;
@@ -173,7 +201,7 @@ async function getLatestTweetByUsername(username) {
   const u = cleanUsername(username);
   if (!u) return null;
 
-  // 1) Try official X API first (may be blocked with 402)
+  // 1) Try official X API first
   try {
     const user = await client.v2.userByUsername(u);
     const userId = user?.data?.id;
@@ -194,18 +222,15 @@ async function getLatestTweetByUsername(username) {
       }
     }
   } catch (e) {
-    console.log(
-      "⚠️ X_API_READ_FAILED (fallback to RSS):",
-      e?.message || e
-    );
+    console.log("⚠️ X_API_READ_FAILED (fallback to RSS):", e?.message || e);
   }
 
-  // 2) Best-effort RSS fallback (Twiiit redirect proxy first)
+  // 2) Twiiit (redirect proxy) — supports RSS or Atom now
   const tw = await getLatestViaTwiiit(u);
   if (tw?.id) return tw;
 
-  // 3) Backup: direct Nitter instances
-  const rss = await getLatestViaNitterRss(u);
+  // 3) Backup direct instances — supports RSS or Atom now
+  const rss = await getLatestViaNitterFeed(u);
   if (rss?.id) return rss;
 
   return null;
