@@ -18,14 +18,11 @@ function cleanUsername(username) {
 
 function stripHtml(input) {
   const s = String(input || "");
-  // remove tags
   const noTags = s.replace(/<[^>]*>/g, " ");
-  // collapse whitespace
   return noTags.replace(/\s+/g, " ").trim();
 }
 
 function decodeEntities(input) {
-  // minimal decode (enough for tweets)
   return String(input || "")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
@@ -36,7 +33,6 @@ function decodeEntities(input) {
 }
 
 function extractFirstTag(xml, tag) {
-  // very small RSS parser (good enough for Nitter RSS)
   const re = new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`, "i");
   const m = xml.match(re);
   return m ? m[1].trim() : "";
@@ -58,45 +54,63 @@ function parseFirstItem(xml) {
   const link = extractFirstCdataOrText(itemXml, "link");
   const guid = extractFirstCdataOrText(itemXml, "guid") || link;
 
-  // Nitter uses <title> + <description> (description often contains HTML)
   const titleRaw = extractFirstCdataOrText(itemXml, "title");
   const descRaw = extractFirstCdataOrText(itemXml, "description");
 
   const title = decodeEntities(stripHtml(titleRaw));
   const desc = decodeEntities(stripHtml(descRaw));
 
-  // Choose best text: description usually contains full tweet text
   const text = (desc && desc.length >= title.length ? desc : title).trim();
 
-  // Try to extract a numeric tweet id from link/guid
   const idMatch = String(link || guid || "").match(/status\/(\d+)/i);
   const id = idMatch ? idMatch[1] : (guid || link || "").slice(0, 80);
 
-  return {
-    id,
-    text,
-    url: link || null,
-  };
+  return { id, text, url: link || null };
 }
 
-async function fetchWithTimeout(url, ms = 8000) {
+async function fetchWithTimeout(url, ms = 9000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
     const res = await fetch(url, {
       method: "GET",
       signal: ctrl.signal,
+      redirect: "follow", // IMPORTANT: follows twiiit -> nitter redirects
       headers: {
-        // Avoid basic blocks
         "user-agent":
           "Mozilla/5.0 (compatible; TheGhanaTraderDeskBot/1.0; +https://example.invalid)",
-        accept: "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
+        accept:
+          "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
       },
     });
     const text = await res.text().catch(() => "");
     return { ok: res.ok, status: res.status, text };
   } finally {
     clearTimeout(t);
+  }
+}
+
+// Twiiit is a redirecting proxy to a working Nitter instance RSS
+// /<user>/rss redirects to an online instance RSS feed. :contentReference[oaicite:2]{index=2}
+async function getLatestViaTwiiit(username) {
+  const u = cleanUsername(username);
+  if (!u) return null;
+
+  const url = `https://twiiit.com/${encodeURIComponent(u)}/rss`;
+  try {
+    const r = await fetchWithTimeout(url, 10000);
+    if (!r.ok || !r.text) {
+      console.log("⚠️ X_RSS_TWIIIT_BAD_RESPONSE:", r.status);
+      return null;
+    }
+    const parsed = parseFirstItem(r.text);
+    if (parsed && parsed.id) return parsed;
+
+    console.log("⚠️ X_RSS_TWIIIT_PARSE_FAILED");
+    return null;
+  } catch (e) {
+    console.log("⚠️ X_RSS_TWIIIT_FETCH_FAILED:", e?.message || e);
+    return null;
   }
 }
 
@@ -112,12 +126,17 @@ function getNitterInstances() {
       .map((s) => s.replace(/\/+$/, ""));
   }
 
-  // Small rotating list (instances change; we try a few)
+  // Expanded list (community-maintained lists exist, but instances change often)
+  // Keeping a few here as backup only. :contentReference[oaicite:3]{index=3}
   return [
-    "https://nitter.net",
-    "https://nitter.cz",
+    "https://nitter.blahaj.land",
+    "https://nitter.batsense.net",
+    "https://nitter.buntcomm.com",
+    "https://nitter.cabletemple.net",
+    "https://nitter.asmallr.tech",
     "https://nitter.privacydev.net",
     "https://nitter.fdn.fr",
+    "https://nitter.cz",
   ];
 }
 
@@ -131,7 +150,6 @@ async function getLatestViaNitterRss(username) {
     try {
       const r = await fetchWithTimeout(url, 9000);
       if (!r.ok || !r.text) {
-        // try next instance
         continue;
       }
       const parsed = parseFirstItem(r.text);
@@ -176,13 +194,17 @@ async function getLatestTweetByUsername(username) {
       }
     }
   } catch (e) {
-    // Minimal signal for upstream (xRssPoster) logs
-    // We do NOT throw; we fall back.
-    const msg = e?.message || String(e);
-    console.log("⚠️ X_API_READ_FAILED (fallback to RSS):", msg);
+    console.log(
+      "⚠️ X_API_READ_FAILED (fallback to RSS):",
+      e?.message || e
+    );
   }
 
-  // 2) Fallback: Nitter RSS (free)
+  // 2) Best-effort RSS fallback (Twiiit redirect proxy first)
+  const tw = await getLatestViaTwiiit(u);
+  if (tw?.id) return tw;
+
+  // 3) Backup: direct Nitter instances
   const rss = await getLatestViaNitterRss(u);
   if (rss?.id) return rss;
 
