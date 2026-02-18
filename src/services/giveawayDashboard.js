@@ -12,12 +12,8 @@ const {
 const { Pool } = require("pg");
 const crypto = require("crypto");
 
-// ✅ Certificate ledger is the source of truth for claim eligibility + owner
-const {
-  findCertificateByCode,
-  findLegacyByCode,
-  markCertificateClaimed,
-} = require("./certificatesLedger");
+// ✅ Certificate ledger is the source of truth for claim eligibility + owner (READ-ONLY)
+const { findCertificateByCode, findLegacyByCode } = require("./certificatesLedger");
 
 // ---------------- ENV / PG ----------------
 const DATABASE_URL = String(process.env.DATABASE_URL || "").trim();
@@ -55,7 +51,7 @@ function normalizeSerial(input) {
   return String(input || "")
     .trim()
     .toUpperCase()
-    .replace(/[^A-Z0-9]/g, ""); // removes dashes/spaces/etc
+    .replace(/[^A-Z0-9]/g, "");
 }
 
 function monthKeyUTC(d = new Date()) {
@@ -66,15 +62,6 @@ function monthKeyUTC(d = new Date()) {
 
 function yearKeyUTC(d = new Date()) {
   return String(d.getUTCFullYear());
-}
-
-function fmtMoneyUSD(n) {
-  const v = Number(n || 0);
-  const abs = Math.abs(v);
-  if (abs >= 1_000_000_000) return `$${(v / 1_000_000_000).toFixed(2)}B`;
-  if (abs >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`;
-  if (abs >= 1_000) return `$${(v / 1_000).toFixed(2)}K`;
-  return `$${Math.round(v).toLocaleString("en-US")}`;
 }
 
 function isFundedReward(label) {
@@ -113,20 +100,29 @@ function memberHighestTier(member) {
 }
 
 async function safeFetchCertByCode(code) {
-  // ledger functions are async
   const c = await findCertificateByCode(code).catch(() => null);
   if (c) return c;
 
-  // legacy is optional; legacy entries are not claimable (no userId)
   const legacy = await findLegacyByCode(code).catch(() => null);
   if (legacy) return { legacy: true, code: legacy.code };
 
   return null;
 }
 
+function staffRow(claimId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`giveaway_claim_approve:${claimId}`)
+      .setLabel("✅ Approve")
+      .setStyle(ButtonStyle.Success),
+    new ButtonBuilder()
+      .setCustomId(`giveaway_claim_reject:${claimId}`)
+      .setLabel("❌ Reject")
+      .setStyle(ButtonStyle.Danger)
+  );
+}
+
 // ---------------- Totals ----------------
-// NOTE: prop_giveaway_issued may be empty (by design now).
-// We still show pending count from claims, and keep totals for approved claims.
 async function computeGiveawayTotals() {
   const mkThis = monthKeyUTC();
   const yk = yearKeyUTC();
@@ -136,7 +132,6 @@ async function computeGiveawayTotals() {
     return rows?.[0] || {};
   };
 
-  // Approved count only (value is unknown without issued table; show 0 value)
   const lifetime = await q(
     `SELECT COUNT(*)::int AS cnt
      FROM public.prop_giveaway_claims
@@ -169,11 +164,8 @@ async function computeGiveawayTotals() {
     mkThis,
     yk,
     lifetimeCnt: Number(lifetime.cnt || 0),
-    lifetimeSum: 0,
     ytdCnt: Number(ytd.cnt || 0),
-    ytdSum: 0,
     monthCnt: Number(thisMonth.cnt || 0),
-    monthSum: 0,
     pendingCnt: Number(pending.cnt || 0),
   };
 }
@@ -189,26 +181,10 @@ function giveawayDashboardEmbed(t) {
       ].join("\n")
     )
     .addFields(
-      {
-        name: "📅 This Month",
-        value: `• **Approved Claims:** **${t.monthCnt}**`,
-        inline: true,
-      },
-      {
-        name: "📈 Year-to-Date",
-        value: `• **Approved Claims:** **${t.ytdCnt}**`,
-        inline: true,
-      },
-      {
-        name: "🏛️ Lifetime",
-        value: `• **Approved Claims:** **${t.lifetimeCnt}**`,
-        inline: true,
-      },
-      {
-        name: "🛡️ Operations",
-        value: `• **Pending Claims:** **${t.pendingCnt}**`,
-        inline: false,
-      }
+      { name: "📅 This Month", value: `• **Approved Claims:** **${t.monthCnt}**`, inline: true },
+      { name: "📈 Year-to-Date", value: `• **Approved Claims:** **${t.ytdCnt}**`, inline: true },
+      { name: "🏛️ Lifetime", value: `• **Approved Claims:** **${t.lifetimeCnt}**`, inline: true },
+      { name: "🛡️ Operations", value: `• **Pending Claims:** **${t.pendingCnt}**`, inline: false }
     )
     .setFooter({ text: `The Ghana Trader Desk • Audited Impact • ${DASH_MARKER}` })
     .setColor(0xc9a24d)
@@ -340,22 +316,16 @@ function buildClaimModal() {
     .setStyle(TextInputStyle.Short)
     .setRequired(true);
 
-  // Email is OPTIONAL; required only for funded/prop rewards
   const email = new TextInputBuilder()
     .setCustomId("email")
     .setLabel("Email (required only for funded/prop account rewards)")
     .setStyle(TextInputStyle.Short)
     .setRequired(false);
 
-  m.addComponents(
-    new ActionRowBuilder().addComponents(serial),
-    new ActionRowBuilder().addComponents(email)
-  );
-
+  m.addComponents(new ActionRowBuilder().addComponents(serial), new ActionRowBuilder().addComponents(email));
   return m;
 }
 
-// ---------------- Core Interaction Handler ----------------
 async function handleGiveawayInteractions(client, interaction) {
   // Button: open modal
   if (interaction.isButton() && interaction.customId === "giveaway_claim") {
@@ -363,11 +333,10 @@ async function handleGiveawayInteractions(client, interaction) {
     return true;
   }
 
-  // Modal submit: strict owner check + create pending claim
+  // Modal submit
   if (interaction.isModalSubmit() && interaction.customId === "giveaway_claim_modal") {
     const serialRaw = String(interaction.fields.getTextInputValue("serial") || "").trim();
     const code = normalizeSerial(serialRaw);
-
     const email = String(interaction.fields.getTextInputValue("email") || "").trim();
 
     if (!code) {
@@ -379,7 +348,6 @@ async function handleGiveawayInteractions(client, interaction) {
 
     const cert = await safeFetchCertByCode(code);
 
-    // Legacy certs are not claimable (no userId)
     if (cert && cert.legacy) {
       await interaction.reply({
         content: "❌ This is a legacy certificate code and cannot be claimed via the dashboard. Please contact staff.",
@@ -396,21 +364,11 @@ async function handleGiveawayInteractions(client, interaction) {
       return true;
     }
 
-    // Strict: only the winner can claim
+    // Strict owner check
     if (String(cert.userId || "") !== String(interaction.user.id || "")) {
       await interaction.reply({
         content:
           "❌ Claim rejected. This certificate was issued to **another member**.\nOnly the original winner can submit this claim.",
-        ephemeral: true,
-      });
-      return true;
-    }
-
-    // Reject if already claimed in ledger
-    if (cert.claimed) {
-      await interaction.reply({
-        content:
-          "⚠️ Already claimed. This certificate reward has already been processed.\nIf you believe this is an error, contact staff.",
         ephemeral: true,
       });
       return true;
@@ -430,7 +388,7 @@ async function handleGiveawayInteractions(client, interaction) {
 
     const claimId = crypto.randomUUID();
 
-    // Insert pending claim (idempotent on serial_code if unique constraint exists)
+    // Insert pending claim (DB-enforced idempotency via unique(serial_code))
     const ok = await pool
       .query(
         `INSERT INTO public.prop_giveaway_claims
@@ -441,7 +399,7 @@ async function handleGiveawayInteractions(client, interaction) {
       .then(() => true)
       .catch((e) => {
         const msg = String(e?.message || e);
-        if (msg.includes("duplicate key") || msg.includes("uq_giveaway_claims_serial_code")) return false;
+        if (msg.includes("duplicate key") || msg.includes("uq_prop_giveaway_claims_serial_code")) return false;
         console.error("[GIVEAWAY_CLAIM] insert failed", msg);
         return null;
       });
@@ -472,19 +430,18 @@ async function handleGiveawayInteractions(client, interaction) {
           { name: "Category", value: String(cert.category || "—"), inline: true },
           { name: "Reward", value: rewardLabel || "—", inline: false },
           { name: "Email", value: email || "—", inline: false },
-          { name: "Reward Type", value: funded ? "Funded/Prop Account" : premiumTier ? `Premium Role (${premiumTier})` : "Other", inline: true }
+          {
+            name: "Reward Type",
+            value: funded ? "Funded/Prop Account" : premiumTier ? `Premium Role (${premiumTier})` : "Other",
+            inline: true,
+          }
         )
         .setColor(0xc9a24d)
         .setTimestamp(new Date());
 
       if (LOGO_URL) e.setThumbnail(LOGO_URL);
 
-      const row = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`giveaway_claim_approve:${claimId}`).setLabel("✅ Approve").setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`giveaway_claim_reject:${claimId}`).setLabel("❌ Reject").setStyle(ButtonStyle.Danger)
-      );
-
-      await q.send({ embeds: [e], components: [row] }).catch(() => null);
+      await q.send({ embeds: [e], components: [staffRow(claimId)] }).catch(() => null);
     }
 
     await interaction.reply({
@@ -501,7 +458,7 @@ async function handleGiveawayInteractions(client, interaction) {
     return true;
   }
 
-  // Staff approve/reject buttons
+  // Staff approve/reject
   if (interaction.isButton() && typeof interaction.customId === "string") {
     const id = interaction.customId;
 
@@ -512,10 +469,15 @@ async function handleGiveawayInteractions(client, interaction) {
     const isReject = id.startsWith(rejectPrefix);
     if (!isApprove && !isReject) return false;
 
-    const claimId = id.split(":")[1];
-    if (!claimId) return false;
+    // Acknowledge immediately to prevent "interaction failed"
+    await interaction.deferReply({ ephemeral: true }).catch(() => null);
 
-    // Load claim row
+    const claimId = id.split(":")[1];
+    if (!claimId) {
+      await interaction.editReply("❌ Invalid claim id.").catch(() => null);
+      return true;
+    }
+
     const claim = await pool
       .query(
         `SELECT id, serial_code, claimant_user_id, email, status
@@ -528,12 +490,12 @@ async function handleGiveawayInteractions(client, interaction) {
       .catch(() => null);
 
     if (!claim) {
-      await interaction.reply({ content: "❌ Claim not found.", ephemeral: true });
+      await interaction.editReply("❌ Claim not found.").catch(() => null);
       return true;
     }
 
     if (String(claim.status) !== "pending") {
-      await interaction.reply({ content: "⚠️ This claim has already been processed.", ephemeral: true });
+      await interaction.editReply("⚠️ This claim has already been processed.").catch(() => null);
       return true;
     }
 
@@ -541,34 +503,29 @@ async function handleGiveawayInteractions(client, interaction) {
 
     const cert = await safeFetchCertByCode(code);
     if (!cert || cert.legacy) {
-      await interaction.reply({ content: "❌ Certificate not found or legacy. Cannot approve.", ephemeral: true });
+      await pool.query(`UPDATE public.prop_giveaway_claims SET status='rejected' WHERE id=$1`, [claimId]).catch(() => null);
+      await interaction.editReply("❌ Certificate not found or legacy. Claim rejected.").catch(() => null);
       return true;
     }
 
     // Strict owner re-check
     if (String(cert.userId || "") !== String(claim.claimant_user_id || "")) {
       await pool.query(`UPDATE public.prop_giveaway_claims SET status='rejected' WHERE id=$1`, [claimId]).catch(() => null);
-      await interaction.reply({
-        content: "❌ Owner mismatch detected. Claim rejected and logged.",
-        ephemeral: true,
-      });
-      return true;
-    }
-
-    // Already claimed in ledger
-    if (cert.claimed) {
-      await pool.query(`UPDATE public.prop_giveaway_claims SET status='rejected' WHERE id=$1`, [claimId]).catch(() => null);
-      await interaction.reply({
-        content: "⚠️ Certificate already claimed previously. Claim rejected.",
-        ephemeral: true,
-      });
+      await interaction.editReply("❌ Owner mismatch detected. Claim rejected and logged.").catch(() => null);
       return true;
     }
 
     if (isReject) {
-      await pool.query(`UPDATE public.prop_giveaway_claims SET status='rejected' WHERE id=$1`, [claimId]).catch(() => null);
+      await pool
+        .query(
+          `UPDATE public.prop_giveaway_claims
+           SET status='rejected', decided_at=NOW(), decided_by=$2
+           WHERE id=$1`,
+          [claimId, interaction.user.id]
+        )
+        .catch(() => null);
 
-      await interaction.reply({ content: "✅ Rejected.", ephemeral: true });
+      await interaction.editReply("✅ Rejected.").catch(() => null);
 
       const user = await client.users.fetch(String(claim.claimant_user_id)).catch(() => null);
       if (user) {
@@ -583,9 +540,6 @@ async function handleGiveawayInteractions(client, interaction) {
     const funded = isFundedReward(rewardLabel);
     const premiumTier = parsePremiumTier(rewardLabel);
 
-    // If funded reward, email should exist (but don't hard-fail approval)
-    // Staff can still proceed if needed.
-
     // Premium role grant (upgrade-only, otherwise skip)
     let roleAction = "none";
     if (premiumTier) {
@@ -594,7 +548,10 @@ async function handleGiveawayInteractions(client, interaction) {
       if (!targetRoleId) {
         roleAction = "missing_role_env";
       } else {
-        const guild = interaction.guild || (await client.guilds.fetch(String(process.env.DISCORD_GUILD_ID || "")).catch(() => null));
+        const guild =
+          interaction.guild ||
+          (await client.guilds.fetch(String(process.env.DISCORD_GUILD_ID || "")).catch(() => null));
+
         const member = guild ? await guild.members.fetch(String(claim.claimant_user_id)).catch(() => null) : null;
 
         if (!member) {
@@ -605,7 +562,6 @@ async function handleGiveawayInteractions(client, interaction) {
           const targetRank = tierRank(premiumTier);
 
           if (currentRank >= targetRank) {
-            // ✅ approved behavior: skip if higher/equal
             roleAction = `skipped_already_${currentTier || "higher"}`;
           } else {
             await member.roles.add(targetRoleId).catch(() => null);
@@ -615,23 +571,18 @@ async function handleGiveawayInteractions(client, interaction) {
       }
     }
 
-    // Mark certificate claimed in ledger (forever memory)
-    const marked = await markCertificateClaimed(code, {
-      adminId: interaction.user.id,
-      ref: claimId,
-      note: funded ? `funded_claim:${String(claim.email || "").slice(0, 120)}` : `claim_approved:${rewardLabel.slice(0, 120)}`,
-    }).catch(() => null);
+    // Mark claim approved in DB (permanent memory)
+    await pool
+      .query(
+        `UPDATE public.prop_giveaway_claims
+         SET status='approved', decided_at=NOW(), decided_by=$2
+         WHERE id=$1`,
+        [claimId, interaction.user.id]
+      )
+      .catch(() => null);
 
-    if (!marked || !marked.ok) {
-      await interaction.reply({ content: "❌ Could not mark certificate claimed. Approval aborted.", ephemeral: true });
-      return true;
-    }
+    await interaction.editReply("✅ Approved.").catch(() => null);
 
-    await pool.query(`UPDATE public.prop_giveaway_claims SET status='approved' WHERE id=$1`, [claimId]).catch(() => null);
-
-    await interaction.reply({ content: "✅ Approved.", ephemeral: true });
-
-    // DM winner
     const user = await client.users.fetch(String(claim.claimant_user_id)).catch(() => null);
     if (user) {
       const extra =
