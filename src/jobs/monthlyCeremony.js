@@ -221,6 +221,11 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
 
   if (!dryRun) await saveMonthWinners(monthKey, winners);
 
+    // Map winner rewards so Top 10 certs can show real prize when applicable
+  const winnerRewardByUserId = Object.fromEntries(
+    (winners || []).map((w) => [String(w.userId), String(w.reward || "")])
+  );
+
   const top3Sales = topNFromSorted(bySales, 3);
   const top3Referrals = topNFromSorted(byJoins, 3);
 
@@ -239,11 +244,13 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
     const username = safeUsernameFromGuild(guild, t.userId);
     const code = genVerificationCode16();
 
+    const rewardLabel = winnerRewardByUserId[String(t.userId)] || "Top 10 Recognition";
+
     const cert = await generateCertificatePNG({
       username,
       userId: t.userId,
       rank: rankLabel,
-      reward: String(reward || "Top 10 Recognition"),
+      reward: rewardLabel,
       month: monthKey,
       verificationCode: code,
     });
@@ -258,7 +265,7 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
       username,
       category,
       rankLabel,
-      rewardLabel: String(reward || "Top 10 Recognition"),
+      rewardLabel,
       code: finalCode,
       filePath,
       rewardClaimable: false,
@@ -276,11 +283,13 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
     const username = safeUsernameFromGuild(guild, t.userId);
     const code = genVerificationCode16();
 
+    const rewardLabel = winnerRewardByUserId[String(t.userId)] || "Top 10 Recognition";
+
     const cert = await generateCertificatePNG({
       username,
       userId: t.userId,
       rank: rankLabel,
-      reward: String(reward || "Top 10 Recognition"),
+      reward: rewardLabel,
       month: monthKey,
       verificationCode: code,
     });
@@ -295,7 +304,7 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
       username,
       category,
       rankLabel,
-      reward: String(reward || "Top 10 Recognition"),
+      rewardLabel,
       code: finalCode,
       filePath,
       rewardClaimable: false,
