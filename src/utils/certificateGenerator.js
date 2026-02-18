@@ -19,16 +19,6 @@ if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 const WIDTH = 1600;
 const HEIGHT = 1000;
 
-// ---------- Font (Linux-safe serif; keeps prestige) ----------
-/**
- * Railway/Linux often doesn't have Georgia installed → it falls back to "tofu" boxes.
- * DejaVu Serif is widely available on Linux and renders cleanly for certificates.
- * We keep the same typography intent: serif + bold/italic hierarchy.
- */
-const CERT_SERIF_FONT = "DejaVu Serif";
-const CERT_SERIF_FALLBACK = "serif";
-const CERT_SERIF_STACK = `${CERT_SERIF_FONT}, ${CERT_SERIF_FALLBACK}`;
-
 // ---------- Cache ----------
 let _bgImg = null;
 let _logoImg = null;
@@ -147,7 +137,7 @@ async function drawQR(ctx, verificationCode) {
 
     ctx.save();
     ctx.fillStyle = "rgba(255,255,255,0.75)";
-    ctx.font = `18px ${CERT_SERIF_STACK}`;
+    ctx.font = "18px Georgia";
     ctx.textAlign = "left";
     ctx.fillText("Scan to verify", x, y + size + 24);
     ctx.restore();
@@ -235,10 +225,10 @@ async function generateCertificatePNG({ username, userId, rank, reward, month, v
   ctx.save();
   ctx.textAlign = "center";
   ctx.fillStyle = gold;
-  ctx.font = `bold 64px ${CERT_SERIF_STACK}`;
+  ctx.font = "bold 64px Georgia";
   ctx.fillText("CERTIFICATE OF HONOR", centerX, 240);
 
-  ctx.font = `28px ${CERT_SERIF_STACK}`;
+  ctx.font = "28px Georgia";
   ctx.fillStyle = "rgba(201,162,77,0.95)";
   ctx.fillText("The Ghana Trader — Monthly Honors", centerX, 290);
   ctx.restore();
@@ -248,10 +238,10 @@ async function generateCertificatePNG({ username, userId, rank, reward, month, v
   ctx.fillStyle = white;
   ctx.textAlign = "center";
 
-  ctx.font = `bold 56px ${CERT_SERIF_STACK}`;
+  ctx.font = "bold 56px Georgia";
   ctx.fillText(name, centerX, 440);
 
-  ctx.font = `30px ${CERT_SERIF_STACK}`;
+  ctx.font = "30px Georgia";
   ctx.fillText(`Rank: ${String(rank ?? "")}`, centerX, 510);
   ctx.fillText(`Reward: ${String(reward ?? "")}`, centerX, 560);
   ctx.fillText(`Month: ${String(month ?? "")}`, centerX, 610);
@@ -261,11 +251,11 @@ async function generateCertificatePNG({ username, userId, rank, reward, month, v
   ctx.save();
   ctx.textAlign = "center";
   ctx.fillStyle = gold;
-  ctx.font = `italic 46px ${CERT_SERIF_STACK}`;
+  ctx.font = "italic 46px Georgia";
   ctx.fillText("TheGhanaTrader", centerX, 745);
 
   ctx.fillStyle = "rgba(255,255,255,0.75)";
-  ctx.font = `22px ${CERT_SERIF_STACK}`;
+  ctx.font = "22px Georgia";
   ctx.fillText("Founder & Lead Trader", centerX, 785);
   ctx.restore();
 
