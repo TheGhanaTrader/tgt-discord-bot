@@ -392,6 +392,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
     await command.execute(interaction);
     } catch (e) {
   console.error("[INTERACTIONS] crash:", e?.message || e);
+  console.error("[INTERACTIONS] stack:", e?.stack || e);
 
   // ✅ Prevent "This interaction failed"
   try {
