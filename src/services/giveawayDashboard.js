@@ -627,9 +627,15 @@ async function handleGiveawayInteractions(client, interaction) {
     const isDelivered = id.startsWith(deliveredPrefix);
 
     if (!isApprove && !isReject && !isDelivered) return false;
+    if (isApprove) {
+      await interaction.showModal(buildStaffApproveModal(claimId));
+      return true;
+    }
 
-    // Acknowledge immediately
-    await interaction.deferReply({ ephemeral: true }).catch(() => null);
+    // IMPORTANT: only defer for reject / delivered
+    if (!isApprove) {
+      await interaction.deferReply({ ephemeral: true }).catch(() => null);
+    }
 
     const claimId = id.split(":")[1];
     if (!claimId) {
