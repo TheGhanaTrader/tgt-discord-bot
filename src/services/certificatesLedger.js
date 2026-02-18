@@ -239,6 +239,44 @@ async function claimCertificateByCode(code, userId) {
   });
 }
 
+async function markCertificateClaimed(code, { adminId = null, ref = null, note = null } = {}) {
+  const normalized = String(code || "").trim().toUpperCase();
+  if (!normalized) return { ok: false, reason: "missing_code" };
+
+  return withLock(async ({ locked }) => {
+    if (!locked) return { ok: false, reason: "busy_try_again" };
+
+    const db = await readDB();
+
+    const cert = db.indexByCode?.[normalized] || null;
+    if (!cert) return { ok: false, reason: "not_found" };
+
+    // must be claimable (same rule as before)
+    const claimable =
+      typeof cert.rewardClaimable === "boolean"
+        ? cert.rewardClaimable
+        : String(cert.rewardLabel || "").trim().toLowerCase() !== "top 10 recognition";
+
+    if (!claimable) return { ok: false, reason: "not_claimable", cert };
+
+    if (cert.claimed) {
+      return { ok: true, already: true, cert };
+    }
+
+    cert.claimed = true;
+    cert.claimedAt = Date.now();
+    cert.claimedBy = adminId ? String(adminId) : "admin";
+
+    // optional audit fields (non-breaking)
+    cert.claimRef = ref ? String(ref).slice(0, 120) : null;
+    cert.claimNote = note ? String(note).slice(0, 500) : null;
+
+    await writeDB(db);
+
+    return { ok: true, already: false, cert };
+  });
+}
+
 /* -------------------- legacy support -------------------- */
 
 function normalizeCode(input) {
@@ -298,6 +336,7 @@ module.exports = {
   findCertificateByCode,
   getUserCertificates,
   claimCertificateByCode,
+  markCertificateClaimed,
   findLegacyByCode,
   markLegacyCertificate,
 };
