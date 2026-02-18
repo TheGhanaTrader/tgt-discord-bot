@@ -43,7 +43,6 @@ async function readDB() {
     db.issued = Array.isArray(db.issued) ? db.issued : [];
     db.indexByCode = db.indexByCode && typeof db.indexByCode === "object" ? db.indexByCode : {};
 
-    // legacy support (for /verifycert legacy:true)
     db.legacy = Array.isArray(db.legacy) ? db.legacy : [];
     db.legacyIndexByCode =
       db.legacyIndexByCode && typeof db.legacyIndexByCode === "object"
@@ -123,14 +122,6 @@ async function withLock(fn, ttlSeconds = 20) {
 
 /**
  * Record a certificate issuance (idempotent by code).
- * category examples:
- * - WINNER_TOP_SALES
- * - WINNER_2ND_SALES
- * - WINNER_TOP_REFERRER
- * - TOP10_SALES
- * - TOP10_REFERRALS
- *
- * NOTE: async because Postgres
  */
 async function recordCertificate({
   monthKey,
@@ -149,12 +140,10 @@ async function recordCertificate({
   if (!normalized) return;
 
   return withLock(async ({ locked }) => {
-    // If lock not acquired, avoid races; best-effort skip
     if (!locked) return;
 
     const db = await readDB();
 
-    // If code already exists, do nothing (idempotent)
     if (db.indexByCode?.[normalized]) return;
 
     const entry = {
@@ -167,8 +156,7 @@ async function recordCertificate({
       code: normalized,
       filePath: filePath || null,
       createdAt: Date.now(),
-      rewardClaimable:
-        typeof rewardClaimable === "boolean" ? rewardClaimable : undefined,
+      rewardClaimable: typeof rewardClaimable === "boolean" ? rewardClaimable : undefined,
       claimed: false,
       claimedAt: null,
       claimedBy: null,
@@ -184,13 +172,65 @@ async function recordCertificate({
   });
 }
 
+/* -------------------- NEW: DB-native lookup + claim overlay -------------------- */
+
+function normalizeCode(input) {
+  return String(input || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+async function getClaimOverlay(code) {
+  const p = pool();
+  const normalized = normalizeCode(code);
+  if (!normalized) return null;
+
+  const row = await p
+    .query(
+      `SELECT code, claimed_at, claimed_by, claim_ref, claim_note
+       FROM public.certificate_claims
+       WHERE code = $1
+       LIMIT 1`,
+      [normalized]
+    )
+    .then((r) => r.rows?.[0] || null)
+    .catch(() => null);
+
+  return row || null;
+}
+
 async function findCertificateByCode(code) {
-  const db = await readDB();
-  const normalized = String(code || "").trim().toUpperCase();
-  return db.indexByCode?.[normalized] || null;
+  const p = pool();
+  const normalized = normalizeCode(code);
+  if (!normalized) return null;
+
+  // ✅ Pull ONLY the one entry from JSONB (prevents huge JSON parse)
+  const cert = await p
+    .query(
+      `SELECT state_json->'indexByCode'-> $2 AS cert
+       FROM public.job_state
+       WHERE job_key = $1
+       LIMIT 1`,
+      [JOB_KEY, normalized]
+    )
+    .then((r) => r.rows?.[0]?.cert || null)
+    .catch(() => null);
+
+  if (!cert || typeof cert !== "object") return null;
+
+  // Overlay claimed state from certificate_claims table (source of truth for claims)
+  const claim = await getClaimOverlay(normalized);
+  if (claim) {
+    cert.claimed = true;
+    cert.claimedAt = claim.claimed_at ? new Date(claim.claimed_at).getTime() : Date.now();
+    cert.claimedBy = claim.claimed_by || "admin";
+    cert.claimRef = claim.claim_ref || null;
+    cert.claimNote = claim.claim_note || null;
+  }
+
+  return cert;
 }
 
 async function getUserCertificates(userId, monthKey = null) {
+  // NOTE: this still uses readDB; keep as-is to avoid behavior change.
   const db = await readDB();
   const uid = String(userId || "");
   const list = Array.isArray(db.issued) ? db.issued : [];
@@ -200,97 +240,115 @@ async function getUserCertificates(userId, monthKey = null) {
 }
 
 async function claimCertificateByCode(code, userId) {
-  const normalized = String(code || "").trim().toUpperCase();
+  const normalized = normalizeCode(code);
   if (!normalized) return { ok: false, reason: "missing_code" };
 
-  // claim modifies state → lock-protected
-  return withLock(async ({ locked }) => {
-    if (!locked) return { ok: false, reason: "busy_try_again" };
+  const cert = await findCertificateByCode(normalized);
+  if (!cert) return { ok: false, reason: "not_found" };
 
-    const db = await readDB();
+  // Only the winner can claim
+  if (String(cert.userId || "") !== String(userId || "")) {
+    return { ok: false, reason: "not_owner" };
+  }
 
-    const cert = db.indexByCode?.[normalized] || null;
-    if (!cert) return { ok: false, reason: "not_found" };
+  // If not claimable, block (same rule as before)
+  const claimable =
+    typeof cert.rewardClaimable === "boolean"
+      ? cert.rewardClaimable
+      : String(cert.rewardLabel || "").trim().toLowerCase() !== "top 10 recognition";
 
-    // Only the winner can claim their own certificate
-    if (String(cert.userId || "") !== String(userId || "")) {
-      return { ok: false, reason: "not_owner" };
-    }
+  if (!claimable) return { ok: false, reason: "not_claimable" };
 
-    // If not claimable, block
-    const claimable =
-      typeof cert.rewardClaimable === "boolean"
-        ? cert.rewardClaimable
-        : String(cert.rewardLabel || "").trim().toLowerCase() !== "top 10 recognition";
+  // Already claimed (overlay)
+  if (cert.claimed) return { ok: false, reason: "already_claimed" };
 
-    if (!claimable) return { ok: false, reason: "not_claimable" };
+  // ✅ Persist claim in DB (idempotent by primary key)
+  const p = pool();
+  const inserted = await p
+    .query(
+      `INSERT INTO public.certificate_claims (code, claimed_by, claim_ref, claim_note)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (code) DO NOTHING`,
+      [normalized, String(userId || ""), null, null]
+    )
+    .then((r) => (r.rowCount || 0) > 0)
+    .catch(() => false);
 
-    // Already claimed
-    if (cert.claimed) return { ok: false, reason: "already_claimed" };
+  if (!inserted) return { ok: false, reason: "already_claimed" };
 
-    cert.claimed = true;
-    cert.claimedAt = Date.now();
-    cert.claimedBy = String(userId || "");
-
-    // Persist
-    await writeDB(db);
-
-    return { ok: true, cert };
-  });
+  // Return cert with overlay refreshed
+  const fresh = await findCertificateByCode(normalized);
+  return { ok: true, cert: fresh || cert };
 }
 
 async function markCertificateClaimed(code, { adminId = null, ref = null, note = null } = {}) {
-  const normalized = String(code || "").trim().toUpperCase();
+  const normalized = normalizeCode(code);
   if (!normalized) return { ok: false, reason: "missing_code" };
 
-  return withLock(async ({ locked }) => {
-    if (!locked) return { ok: false, reason: "busy_try_again" };
+  const cert = await findCertificateByCode(normalized);
+  if (!cert) return { ok: false, reason: "not_found" };
 
-    const db = await readDB();
+  const claimable =
+    typeof cert.rewardClaimable === "boolean"
+      ? cert.rewardClaimable
+      : String(cert.rewardLabel || "").trim().toLowerCase() !== "top 10 recognition";
 
-    const cert = db.indexByCode?.[normalized] || null;
-    if (!cert) return { ok: false, reason: "not_found" };
+  if (!claimable) return { ok: false, reason: "not_claimable", cert };
 
-    // must be claimable (same rule as before)
-    const claimable =
-      typeof cert.rewardClaimable === "boolean"
-        ? cert.rewardClaimable
-        : String(cert.rewardLabel || "").trim().toLowerCase() !== "top 10 recognition";
+  // Already claimed (overlay)
+  if (cert.claimed) return { ok: true, already: true, cert };
 
-    if (!claimable) return { ok: false, reason: "not_claimable", cert };
+  const p = pool();
 
-    if (cert.claimed) {
-      return { ok: true, already: true, cert };
-    }
+  // ✅ Persist claim in DB (no huge JSON writes)
+  const inserted = await p
+    .query(
+      `INSERT INTO public.certificate_claims (code, claimed_by, claim_ref, claim_note)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (code) DO NOTHING`,
+      [
+        normalized,
+        adminId ? String(adminId) : "admin",
+        ref ? String(ref).slice(0, 120) : null,
+        note ? String(note).slice(0, 500) : null,
+      ]
+    )
+    .then((r) => (r.rowCount || 0) > 0)
+    .catch(() => false);
 
-    cert.claimed = true;
-    cert.claimedAt = Date.now();
-    cert.claimedBy = adminId ? String(adminId) : "admin";
+  if (!inserted) {
+    const again = await findCertificateByCode(normalized);
+    return { ok: true, already: true, cert: again || cert };
+  }
 
-    // optional audit fields (non-breaking)
-    cert.claimRef = ref ? String(ref).slice(0, 120) : null;
-    cert.claimNote = note ? String(note).slice(0, 500) : null;
-
-    await writeDB(db);
-
-    return { ok: true, already: false, cert };
-  });
+  const fresh = await findCertificateByCode(normalized);
+  return { ok: true, already: false, cert: fresh || cert };
 }
 
-/* -------------------- legacy support -------------------- */
-
-function normalizeCode(input) {
-  return String(input || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
-}
+/* -------------------- legacy support (DB-native lookup) -------------------- */
 
 async function findLegacyByCode(code) {
-  const db = await readDB();
+  const p = pool();
   const normalized = normalizeCode(code);
   if (!normalized) return null;
-  return db.legacyIndexByCode?.[normalized] || null;
+
+  const legacy = await p
+    .query(
+      `SELECT state_json->'legacyIndexByCode'-> $2 AS legacy
+       FROM public.job_state
+       WHERE job_key = $1
+       LIMIT 1`,
+      [JOB_KEY, normalized]
+    )
+    .then((r) => r.rows?.[0]?.legacy || null)
+    .catch(() => null);
+
+  if (!legacy || typeof legacy !== "object") return null;
+  return legacy;
 }
 
 async function markLegacyCertificate({ code, markedByUserId, note }) {
+  // unchanged (still writes ledger json). Leave as-is to avoid behavior change.
   const normalized = normalizeCode(code);
   if (!normalized) return { ok: false, reason: "missing_code" };
 
@@ -299,12 +357,10 @@ async function markLegacyCertificate({ code, markedByUserId, note }) {
 
     const db = await readDB();
 
-    // If it exists as a real issued cert, do not mark legacy (prevents conflicts)
     if (db.indexByCode?.[normalized]) {
       return { ok: false, reason: "already_issued_cert" };
     }
 
-    // idempotent legacy mark
     if (db.legacyIndexByCode?.[normalized]) {
       return { ok: true, already: true, entry: db.legacyIndexByCode[normalized] };
     }
