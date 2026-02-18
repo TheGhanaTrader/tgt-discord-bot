@@ -14,8 +14,6 @@ const { Pool } = require("pg");
 const crypto = require("crypto");
 const fs = require("fs");
 const path = require("path");
-const os = require("os");
-const path = require("path");
 const { generateCertificatePNG } = require("../utils/certificateGenerator");
 
 // ✅ Certificate ledger is the source of truth for claim eligibility + owner (READ-ONLY)
@@ -113,6 +111,7 @@ function fmtMoneyUSD(n) {
   if (abs >= 1_000) return `$${(v / 1_000).toFixed(2)}K`;
   return `$${Math.round(v).toLocaleString("en-US")}`;
 }
+
 function parseFundedAmountUSD(label) {
   const s = String(label || "").toUpperCase();
   // matches 10K, 25K, 50K, 100K, etc
@@ -194,62 +193,28 @@ function staffDeliveredRow(claimId) {
 }
 
 // --- Attach cert to verified giveaways log (best-effort, no crashes) ---
-async function buildCertificateAttachment(cert, code) {
-  const fp = cert?.filePath ? String(cert.filePath) : "";
-  if (!fp) return { files: [], imageUrl: null };
-
-  const isUrl = /^https?:\/\//i.test(fp);
-
-  // If URL: download and attach, then embed image = attachment://...
-  if (isUrl && typeof fetch === "function") {
-    try {
-      const res = await fetch(fp);
-      if (!res.ok) return { files: [], imageUrl: fp }; // fallback to just showing URL
-
-      const ab = await res.arrayBuffer();
-      const buf = Buffer.from(ab);
-
-      // Pick extension from URL if possible
-      const urlPath = fp.split("?")[0];
-      const ext = path.extname(urlPath) || ".png";
-      const name = `certificate-${code}${ext}`;
-
-      const att = new AttachmentBuilder(buf, { name });
-      return { files: [att], imageUrl: `attachment://${name}` };
-    } catch {
-      return { files: [], imageUrl: fp };
-    }
-  }
-
-  // If local path exists: attach
-  try {
-    if (fs.existsSync(fp)) {
-      const name = path.basename(fp) || `certificate-${code}.png`;
-      const att = new AttachmentBuilder(fp, { name });
-      return { files: [att], imageUrl: `attachment://${name}` };
-    }
-  } catch {
-    // ignore
-  }
-
-  // If nothing: no file
-  return { files: [], imageUrl: null };
-}
 async function buildCertificateAttachment(cert, fallbackCode) {
   // Returns: { files: [AttachmentBuilder], imageUrl: string|null }
   // Never throws (caller already catches, but we keep it safe)
   try {
     const fp = cert?.filePath ? String(cert.filePath) : "";
-    const code = String(cert?.code || fallbackCode || "").trim();
+    const code = String(cert?.code || fallbackCode || "").trim() || "CERT";
+
+    // helper to build a named attachment we can reference in embed.setImage()
+    const makeNamed = (filePath) => {
+      const name = `certificate-${code}.png`;
+      const file = new AttachmentBuilder(filePath, { name });
+      return { files: [file], imageUrl: `attachment://${name}` };
+    };
 
     // 1) If stored filePath is a URL, use embed image
     if (/^https?:\/\//i.test(fp)) {
       return { files: [], imageUrl: fp };
     }
 
-    // 2) If stored filePath exists on disk, attach it
+    // 2) If stored filePath exists on disk, attach it (named so it renders inline)
     if (fp && fs.existsSync(fp)) {
-      return { files: [new AttachmentBuilder(fp)], imageUrl: null };
+      return makeNamed(fp);
     }
 
     // 3) If file is missing (Railway restart/ephemeral FS), REGENERATE and attach
@@ -260,19 +225,12 @@ async function buildCertificateAttachment(cert, fallbackCode) {
       rank: cert?.rankLabel || "Winner",
       reward: cert?.rewardLabel || "—",
       month: cert?.monthKey || "—",
-      verificationCode: code || fallbackCode,
+      verificationCode: code,
     });
 
     const regenPath = regen?.filePath ? String(regen.filePath) : "";
     if (regenPath && fs.existsSync(regenPath)) {
-      const file = new AttachmentBuilder(regenPath);
-
-      // Optional cleanup: delete temp file after sending
-      // (we cannot delete AFTER send here because send happens outside,
-      // but we can still delete safely on next cycle if you want).
-      // For now, keep it simple and stable.
-
-      return { files: [file], imageUrl: null };
+      return makeNamed(regenPath);
     }
 
     return { files: [], imageUrl: null };
@@ -280,7 +238,6 @@ async function buildCertificateAttachment(cert, fallbackCode) {
     return { files: [], imageUrl: null };
   }
 }
-
 
 async function postDeliveredToVerifiedGiveawaysChannel(client, { claim, cert, code }) {
   if (!VERIFIED_GIVEAWAYS_CHANNEL_ID) return;
@@ -299,7 +256,7 @@ async function postDeliveredToVerifiedGiveawaysChannel(client, { claim, cert, co
     .setTitle("✅ Giveaway Delivered — Verified")
     .setDescription(`Certificate Code: \`${code}\``)
     .addFields(
-      { name: "Member", value: `<@${String(claim.claimant_user_id)}>` , inline: true },
+      { name: "Member", value: `<@${String(claim.claimant_user_id)}>`, inline: true },
       { name: "Reward", value: rewardLabel || "—", inline: true },
       { name: "Firm", value: firm || "—", inline: true },
       { name: "Method", value: method || "—", inline: true },
@@ -655,7 +612,9 @@ async function handleGiveawayInteractions(client, interaction) {
       }
 
       if (String(claim.claimant_user_id) !== String(interaction.user.id)) {
-        await interaction.reply({ content: "❌ This fulfillment link is not for your account.", ephemeral: true }).catch(() => null);
+        await interaction
+          .reply({ content: "❌ This fulfillment link is not for your account.", ephemeral: true })
+          .catch(() => null);
         return true;
       }
 
@@ -695,10 +654,12 @@ async function handleGiveawayInteractions(client, interaction) {
         await q.send({ embeds: [e], components: [staffDeliveredRow(claimId)] }).catch(() => null);
       }
 
-      await interaction.reply({
-        content: "✅ Submitted. Staff will complete fulfillment and confirm delivery.",
-        ephemeral: true,
-      }).catch(() => null);
+      await interaction
+        .reply({
+          content: "✅ Submitted. Staff will complete fulfillment and confirm delivery.",
+          ephemeral: true,
+        })
+        .catch(() => null);
 
       return true;
     }
@@ -720,27 +681,33 @@ async function handleGiveawayInteractions(client, interaction) {
     const cert = await safeFetchCertByCode(code);
 
     if (cert && cert.legacy) {
-      await interaction.reply({
-        content: "❌ This is a legacy certificate code and cannot be claimed via the dashboard. Please contact staff.",
-        ephemeral: true,
-      }).catch(() => null);
+      await interaction
+        .reply({
+          content: "❌ This is a legacy certificate code and cannot be claimed via the dashboard. Please contact staff.",
+          ephemeral: true,
+        })
+        .catch(() => null);
       return true;
     }
 
     if (!cert) {
-      await interaction.reply({
-        content: "❌ Invalid certificate code. Please check the code on your certificate and try again.",
-        ephemeral: true,
-      }).catch(() => null);
+      await interaction
+        .reply({
+          content: "❌ Invalid certificate code. Please check the code on your certificate and try again.",
+          ephemeral: true,
+        })
+        .catch(() => null);
       return true;
     }
 
     if (String(cert.userId || "") !== String(interaction.user.id || "")) {
-      await interaction.reply({
-        content:
-          "❌ Claim rejected. This certificate was issued to **another member**.\nOnly the original winner can submit this claim.",
-        ephemeral: true,
-      }).catch(() => null);
+      await interaction
+        .reply({
+          content:
+            "❌ Claim rejected. This certificate was issued to **another member**.\nOnly the original winner can submit this claim.",
+          ephemeral: true,
+        })
+        .catch(() => null);
       return true;
     }
 
@@ -749,10 +716,12 @@ async function handleGiveawayInteractions(client, interaction) {
     const premiumTier = parsePremiumTier(rewardLabel);
 
     if (funded && !email) {
-      await interaction.reply({
-        content: "❌ Email is required for funded/prop account rewards. Please submit again with your email.",
-        ephemeral: true,
-      }).catch(() => null);
+      await interaction
+        .reply({
+          content: "❌ Email is required for funded/prop account rewards. Please submit again with your email.",
+          ephemeral: true,
+        })
+        .catch(() => null);
       return true;
     }
 
@@ -779,11 +748,13 @@ async function handleGiveawayInteractions(client, interaction) {
       });
 
     if (ok === false) {
-      await interaction.reply({
-        content:
-          "⚠️ Already submitted. This certificate code has already been submitted/processed.\nIf you believe this is an error, contact staff.",
-        ephemeral: true,
-      }).catch(() => null);
+      await interaction
+        .reply({
+          content:
+            "⚠️ Already submitted. This certificate code has already been submitted/processed.\nIf you believe this is an error, contact staff.",
+          ephemeral: true,
+        })
+        .catch(() => null);
       return true;
     }
     if (ok === null) {
@@ -805,7 +776,11 @@ async function handleGiveawayInteractions(client, interaction) {
           { name: "Email", value: email || "—", inline: false },
           {
             name: "Reward Type",
-            value: funded ? `Funded/Prop Account (${fmtMoneyUSD(rewardValueUsd)})` : premiumTier ? `Premium Role (${premiumTier})` : "Other",
+            value: funded
+              ? `Funded/Prop Account (${fmtMoneyUSD(rewardValueUsd)})`
+              : premiumTier
+              ? `Premium Role (${premiumTier})`
+              : "Other",
             inline: true,
           }
         )
@@ -817,10 +792,12 @@ async function handleGiveawayInteractions(client, interaction) {
       await q.send({ embeds: [e], components: [staffRow(claimId)] }).catch(() => null);
     }
 
-    await interaction.reply({
-      content: "✅ Claim submitted for staff review. You will be notified after approval or rejection.",
-      ephemeral: true,
-    }).catch(() => null);
+    await interaction
+      .reply({
+        content: "✅ Claim submitted for staff review. You will be notified after approval or rejection.",
+        ephemeral: true,
+      })
+      .catch(() => null);
 
     await interaction.user
       .send(
@@ -1120,7 +1097,9 @@ async function handleGiveawayInteractions(client, interaction) {
         "",
         "Now create your account on the firm site (if required), then submit the email you used:",
         extraRole,
-      ].filter(Boolean).join("\n");
+      ]
+        .filter(Boolean)
+        .join("\n");
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder()
