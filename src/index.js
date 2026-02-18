@@ -241,7 +241,7 @@ client.on("guildMemberAdd", async (member) => {
 // ===== INTERACTIONS =====
 client.on(Events.InteractionCreate, async (interaction) => {
   try {
-    // 🔹 GIVEAWAY DASHBOARD (single handler)
+    // 🔹 GIVEAWAY / FUNDED / PAYOUT handlers (single pass)
     if (await handleGiveawayDashboardInteractions(client, interaction)) return;
     if (await handleFundedInteractions(client, interaction)) return;
     if (await handlePayoutInteractions(client, interaction)) return;
@@ -249,110 +249,150 @@ client.on(Events.InteractionCreate, async (interaction) => {
     // Inject TGT context for BOTH buttons and slash commands
     attachTgtContext(interaction);
 
-    const guild = interaction.guild;
-    if (!guild) return interaction.reply({ content: "Use this inside the server.", ephemeral: true });
-    
-    const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+    // =========================
+    // ✅ BUTTONS
+    // =========================
+    if (interaction.isButton()) {
+      const id = interaction.customId;
 
-     // =========================
-  // ✅ BUTTONS (continues inside InteractionCreate)
-  // =========================
+      // ---- Contract Gate buttons ----
+      if (id === "contract_view") return handleContractView(interaction);
+      if (id === "contract_accept") return handleContractAccept(interaction);
 
-  // Prestige DM with upgrade options (only first-time verify)
-  if (!hasVerified) {
-    try {
-      const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
-      const TIERS = interaction?.tgt?.TIERS || getTiers();
+      // ---- Verify Free ----
+      if (id === "tgt_gate_verify_free") {
+        const VERIFIED_ROLE_ID =
+          process.env.ROLE_VERIFIED_ID ||
+          process.env.ROLE_VERIFIED ||
+          process.env.VERIFIED_ROLE_ID;
 
-      const safePrice = (v) => (v === undefined || v === null || v === "" ? "—" : String(v));
-      const safePeriod = (v) => (v === undefined || v === null || v === "" ? "" : String(v));
+        if (!VERIFIED_ROLE_ID) {
+          return interaction.reply({
+            content: "Server misconfigured: Verified role missing (ROLE_VERIFIED_ID).",
+            ephemeral: true,
+          });
+        }
 
-      const dmEmbed = new EmbedBuilder()
-        .setTitle("🏛️ Welcome to The Ghana Trader Desk")
-        .setDescription(
-          [
-            "✅ **Verification complete.** Your free access is now active.",
-            "",
-            "If you ever want **full desk access**, you can upgrade anytime:",
-            `🥈 **Silver** — GHS ${safePrice(TIERS.silver?.priceGhs)} / ${safePeriod(TIERS.silver?.periodLabel)}`,
-            `🥇 **Gold** — GHS ${safePrice(TIERS.gold?.priceGhs)} / ${safePeriod(TIERS.gold?.periodLabel)}`,
-            `💎 **Diamond** — GHS ${safePrice(TIERS.diamond?.priceGhs)} / ${safePeriod(TIERS.diamond?.periodLabel)}`,
-          ].join("\n")
-        )
-        .setColor(0xC9A24D)
-        .setFooter({ text: "The Ghana Trader • Prestige. Proof. Performance." });
+        const guild = interaction.guild;
+        if (!guild) {
+          return interaction.reply({ content: "Use this inside the server.", ephemeral: true });
+        }
 
-      if (PUBLIC_BASE_URL) {
-        const makeUrl = (tier) => {
-          const u = new URL(`${PUBLIC_BASE_URL}/auth/discord/start`);
-          u.searchParams.set("tier", String(tier).toUpperCase());
-          return u.toString();
-        };
+        const member = await guild.members.fetch(interaction.user.id).catch(() => null);
+        if (!member) {
+          return interaction.reply({ content: "Could not fetch member.", ephemeral: true });
+        }
+
+        const hasVerified = member.roles.cache.has(VERIFIED_ROLE_ID);
+        if (!hasVerified) await member.roles.add(VERIFIED_ROLE_ID).catch(() => null);
+
+        // Prestige DM (ONLY first-time verify)
+        if (!hasVerified) {
+          try {
+            const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+            const TIERS = interaction?.tgt?.TIERS || getTiers();
+
+            const safePrice = (v) => (v === undefined || v === null || v === "" ? "—" : String(v));
+            const safePeriod = (v) => (v === undefined || v === null || v === "" ? "" : String(v));
+
+            const dmEmbed = new EmbedBuilder()
+              .setTitle("🏛️ Welcome to The Ghana Trader Desk")
+              .setDescription(
+                [
+                  "✅ **Verification complete.** Your free access is now active.",
+                  "",
+                  "If you ever want **full desk access**, you can upgrade anytime:",
+                  `🥈 **Silver** — GHS ${safePrice(TIERS.silver?.priceGhs)} / ${safePeriod(TIERS.silver?.periodLabel)}`,
+                  `🥇 **Gold** — GHS ${safePrice(TIERS.gold?.priceGhs)} / ${safePeriod(TIERS.gold?.periodLabel)}`,
+                  `💎 **Diamond** — GHS ${safePrice(TIERS.diamond?.priceGhs)} / ${safePeriod(TIERS.diamond?.periodLabel)}`,
+                ].join("\n")
+              )
+              .setColor(0xC9A24D)
+              .setFooter({ text: "The Ghana Trader • Prestige. Proof. Performance." });
+
+            if (PUBLIC_BASE_URL) {
+              const makeUrl = (tier) => {
+                const u = new URL(`${PUBLIC_BASE_URL}/auth/discord/start`);
+                u.searchParams.set("tier", String(tier).toUpperCase());
+                return u.toString();
+              };
+
+              const row = new ActionRowBuilder().addComponents(
+                new ButtonBuilder().setLabel("Silver").setStyle(ButtonStyle.Link).setURL(makeUrl("SILVER")),
+                new ButtonBuilder().setLabel("Gold").setStyle(ButtonStyle.Link).setURL(makeUrl("GOLD")),
+                new ButtonBuilder().setLabel("Diamond").setStyle(ButtonStyle.Link).setURL(makeUrl("DIAMOND"))
+              );
+
+              await interaction.user.send({ embeds: [dmEmbed], components: [row] }).catch(() => null);
+            } else {
+              await interaction.user.send({ embeds: [dmEmbed] }).catch(() => null);
+            }
+          } catch (_) {}
+        }
+
+        const contractUrl =
+          "https://discord.com/channels/1449315468694392844/1449315470133170308";
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setLabel("Silver").setStyle(ButtonStyle.Link).setURL(makeUrl("SILVER")),
-          new ButtonBuilder().setLabel("Gold").setStyle(ButtonStyle.Link).setURL(makeUrl("GOLD")),
-          new ButtonBuilder().setLabel("Diamond").setStyle(ButtonStyle.Link).setURL(makeUrl("DIAMOND"))
+          new ButtonBuilder()
+            .setStyle(ButtonStyle.Link)
+            .setLabel("Open Contract Gate")
+            .setURL(contractUrl)
         );
 
-        await interaction.user.send({ embeds: [dmEmbed], components: [row] });
-      } else {
-        await interaction.user.send({ embeds: [dmEmbed] });
+        return interaction.reply({
+          content: hasVerified
+            ? "✅ You’re already verified. Open Contract Gate to accept the contract."
+            : "✅ Verified — free access granted. Open Contract Gate to accept the contract.",
+          components: [row],
+          ephemeral: true,
+        });
       }
-    } catch (_) {}
+
+      // ---- Premium buttons on the gate ----
+      const map = {
+        tgt_gate_buy_silver: "SILVER",
+        tgt_gate_buy_gold: "GOLD",
+        tgt_gate_buy_diamond: "DIAMOND",
+      };
+
+      if (map[id]) {
+        const tier = map[id];
+        const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
+        if (!base) return interaction.reply({ content: "Missing env: PUBLIC_BASE_URL", ephemeral: true });
+
+        const url = new URL(`${base}/auth/discord/start`);
+        url.searchParams.set("tier", tier);
+
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setStyle(ButtonStyle.Link)
+            .setLabel(`Proceed to Paystack (${tier})`)
+            .setURL(url.toString())
+        );
+
+        return interaction.reply({
+          content: "✅ Click below to complete payment securely on Paystack:",
+          components: [row],
+          ephemeral: true,
+        });
+      }
+
+      return; // stop here for buttons
+    }
+
+    // =========================
+    // ✅ SLASH COMMANDS
+    // =========================
+    if (!interaction.isChatInputCommand()) return;
+
+    const command = client.commands.get(interaction.commandName);
+    if (!command) return interaction.reply({ content: "Unknown command.", ephemeral: true });
+
+    await command.execute(interaction);
+  } catch (e) {
+    console.error("[INTERACTIONS] crash:", e?.message || e);
   }
-
-  const contractUrl = "https://discord.com/channels/1449315468694392844/1449315470133170308";
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder()
-      .setStyle(ButtonStyle.Link)
-      .setLabel("Open Contract Gate")
-      .setURL(contractUrl)
-  );
-
-  return interaction.reply({
-    content: hasVerified
-      ? "✅ You’re already verified. Open Contract Gate to accept the contract."
-      : "✅ Verified — free access granted. Open Contract Gate to accept the contract.",
-    components: [row],
-    ephemeral: true,
-  });
-
-  // B) Premium buttons on the gate (dynamic per clicker)
-  const map = {
-    tgt_gate_buy_silver: "SILVER",
-    tgt_gate_buy_gold: "GOLD",
-    tgt_gate_buy_diamond: "DIAMOND",
-  };
-
-  if (map[id]) {
-    const tier = map[id];
-    const base = (process.env.PUBLIC_BASE_URL || "").replace(/\/$/, "");
-
-    if (!base) return interaction.reply({ content: "Missing env: PUBLIC_BASE_URL", ephemeral: true });
-
-    const url = new URL(`${base}/auth/discord/start`);
-    url.searchParams.set("tier", tier);
-
-    const payRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setStyle(ButtonStyle.Link)
-        .setLabel(`Proceed to Paystack (${tier})`)
-        .setURL(url.toString())
-    );
-
-    return interaction.reply({
-      content: "✅ Click below to complete payment securely on Paystack:",
-      components: [payRow],
-      ephemeral: true,
-    });
-  }
-
-  return; // stop here for buttons
-} catch (e) {
-  console.error("[INTERACTIONS] crash:", e?.message || e);
-}
 });
 
 // ===== BOOT =====
