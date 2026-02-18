@@ -627,21 +627,29 @@ async function handleGiveawayInteractions(client, interaction) {
     const isDelivered = id.startsWith(deliveredPrefix);
 
     if (!isApprove && !isReject && !isDelivered) return false;
-    if (isApprove) {
-      await interaction.showModal(buildStaffApproveModal(claimId));
-      return true;
-    }
 
-    // IMPORTANT: only defer for reject / delivered
-    if (!isApprove) {
-      await interaction.deferReply({ ephemeral: true }).catch(() => null);
-    }
+// 🔑 extract claimId FIRST
+const claimId = id.split(":")[1];
+if (!claimId) {
+  if (isApprove) {
+    await interaction
+      .reply({ content: "❌ Invalid claim id.", ephemeral: true })
+      .catch(() => null);
+  } else {
+    await interaction.deferReply({ ephemeral: true }).catch(() => null);
+    await interaction.editReply("❌ Invalid claim id.").catch(() => null);
+  }
+  return true;
+}
 
-    const claimId = id.split(":")[1];
-    if (!claimId) {
-      await interaction.editReply("❌ Invalid claim id.").catch(() => null);
-      return true;
-    }
+// ✅ APPROVE: modal must be FIRST response (NO defer)
+if (isApprove) {
+  await interaction.showModal(buildStaffApproveModal(claimId));
+  return true;
+}
+
+// ❌ Reject / ✅ Delivered → safe to defer
+await interaction.deferReply({ ephemeral: true }).catch(() => null);
 
     // Delivered action
     if (isDelivered) {
