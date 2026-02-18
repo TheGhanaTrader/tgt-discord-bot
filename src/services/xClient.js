@@ -11,6 +11,12 @@ const client = new TwitterApi({
   accessSecret: process.env.X_ACCESS_TOKEN_SECRET,
 });
 
+// One-time boot signal so we can confirm the deployed code version
+const _rsshubBase = String(process.env.RSSHUB_BASE_URL || "https://rsshub.app")
+  .trim()
+  .replace(/\/+$/, "");
+console.log("✅ X_CLIENT_BOOT: RSSHub enabled", { RSSHUB_BASE_URL: _rsshubBase });
+
 // -------------------- Helpers --------------------
 function cleanUsername(username) {
   return String(username || "").replace(/^@/, "").trim();
@@ -26,6 +32,7 @@ function decodeEntities(input) {
   return String(input || "")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'")
@@ -74,10 +81,11 @@ function parseFirstAtomEntry(xml) {
 
   const entryXml = entryMatch[1];
 
-  // Atom commonly uses <id>, <title>, <content>, and link as <link href="..."/>
   const idRaw = extractFirstCdataOrText(entryXml, "id");
   const titleRaw = extractFirstCdataOrText(entryXml, "title");
-  const contentRaw = extractFirstCdataOrText(entryXml, "content") || extractFirstCdataOrText(entryXml, "summary");
+  const contentRaw =
+    extractFirstCdataOrText(entryXml, "content") ||
+    extractFirstCdataOrText(entryXml, "summary");
 
   const hrefMatch = entryXml.match(/<link[^>]+href="([^"]+)"/i);
   const link = hrefMatch ? hrefMatch[1] : "";
@@ -96,7 +104,6 @@ function parseFirstAtomEntry(xml) {
 }
 
 function parseFeed(xml) {
-  // Try RSS first, then Atom
   return parseFirstRssItem(xml) || parseFirstAtomEntry(xml) || null;
 }
 
@@ -123,6 +130,36 @@ async function fetchWithTimeout(url, ms = 9000) {
 }
 
 // -------------------- RSS/Atom fallback sources --------------------
+
+// 1) RSSHub (best fallback)
+async function getLatestViaRssHub(username) {
+  const u = cleanUsername(username);
+  if (!u) return null;
+
+  const base = _rsshubBase;
+  const url = `${base}/twitter/user/${encodeURIComponent(u)}`;
+
+  // log only when we actually attempt RSSHub
+  console.log("🔎 X_RSSHUB_FETCH:", url);
+
+  try {
+    const r = await fetchWithTimeout(url, 10000);
+    if (!r.ok || !r.text) {
+      console.log("⚠️ X_RSSHUB_BAD_RESPONSE:", r.status);
+      return null;
+    }
+    const parsed = parseFeed(r.text);
+    if (parsed && parsed.id) return parsed;
+
+    console.log("⚠️ X_RSSHUB_PARSE_FAILED");
+    return null;
+  } catch (e) {
+    console.log("⚠️ X_RSSHUB_FETCH_FAILED:", e?.message || e);
+    return null;
+  }
+}
+
+// 2) Twiiit (backup only)
 async function getLatestViaTwiiit(username) {
   const u = cleanUsername(username);
   if (!u) return null;
@@ -144,49 +181,6 @@ async function getLatestViaTwiiit(username) {
     console.log("⚠️ X_RSS_TWIIIT_FETCH_FAILED:", e?.message || e);
     return null;
   }
-}
-
-function getNitterInstances() {
-  const env = String(process.env.NITTER_INSTANCES || "").trim();
-  if (env) {
-    return env
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean)
-      .map((s) => (s.startsWith("http") ? s : `https://${s}`))
-      .map((s) => s.replace(/\/+$/, ""));
-  }
-
-  return [
-    "https://nitter.blahaj.land",
-    "https://nitter.batsense.net",
-    "https://nitter.buntcomm.com",
-    "https://nitter.cabletemple.net",
-    "https://nitter.asmallr.tech",
-    "https://nitter.privacydev.net",
-    "https://nitter.fdn.fr",
-    "https://nitter.cz",
-  ];
-}
-
-async function getLatestViaNitterFeed(username) {
-  const u = cleanUsername(username);
-  if (!u) return null;
-
-  const instances = getNitterInstances();
-  for (const base of instances) {
-    const url = `${base}/${encodeURIComponent(u)}/rss`;
-    try {
-      const r = await fetchWithTimeout(url, 9000);
-      if (!r.ok || !r.text) continue;
-
-      const parsed = parseFeed(r.text);
-      if (parsed && parsed.id) return parsed;
-    } catch {
-      // try next
-    }
-  }
-  return null;
 }
 
 // -------------------- Public API --------------------
@@ -225,13 +219,13 @@ async function getLatestTweetByUsername(username) {
     console.log("⚠️ X_API_READ_FAILED (fallback to RSS):", e?.message || e);
   }
 
-  // 2) Twiiit (redirect proxy) — supports RSS or Atom now
+  // 2) RSSHub fallback (we must see logs now)
+  const rh = await getLatestViaRssHub(u);
+  if (rh?.id) return rh;
+
+  // 3) Twiiit fallback (backup)
   const tw = await getLatestViaTwiiit(u);
   if (tw?.id) return tw;
-
-  // 3) Backup direct instances — supports RSS or Atom now
-  const rss = await getLatestViaNitterFeed(u);
-  if (rss?.id) return rss;
 
   return null;
 }
