@@ -13,6 +13,7 @@ const {
 const { Pool } = require("pg");
 const crypto = require("crypto");
 const fs = require("fs");
+const path = require("path");
 
 // ✅ Certificate ledger is the source of truth for claim eligibility + owner (READ-ONLY)
 const { findCertificateByCode, findLegacyByCode } = require("./certificatesLedger");
@@ -101,6 +102,53 @@ function memberHighestTier(member) {
   return null;
 }
 
+function fmtMoneyUSD(n) {
+  const v = Number(n || 0);
+  const abs = Math.abs(v);
+  if (abs >= 1_000_000_000) return `$${(v / 1_000_000_000).toFixed(2)}B`;
+  if (abs >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`;
+  if (abs >= 1_000) return `$${(v / 1_000).toFixed(2)}K`;
+  return `$${Math.round(v).toLocaleString("en-US")}`;
+}
+
+// Parse funded size from label like "25K Funded Account" -> 25000
+function parseFundedUsdValue(label) {
+  const s = String(label || "").toUpperCase();
+
+  // Look for patterns like 25K, 100K, 1M
+  const m = s.match(/(\d+(?:\.\d+)?)\s*(K|M)\b/);
+  if (m) {
+    const num = Number(m[1]);
+    const unit = m[2];
+    if (!Number.isFinite(num)) return 0;
+    if (unit === "K") return Math.round(num * 1000);
+    if (unit === "M") return Math.round(num * 1_000_000);
+  }
+
+  // Fallback: plain number like "25000 Funded"
+  const n = s.match(/\b(\d{4,})\b/);
+  if (n) {
+    const val = Number(n[1]);
+    return Number.isFinite(val) ? Math.round(val) : 0;
+  }
+
+  return 0;
+}
+
+function rewardTypeFrom(rewardLabel) {
+  const funded = isFundedReward(rewardLabel);
+  const premiumTier = parsePremiumTier(rewardLabel);
+  if (funded) return "FUNDED";
+  if (premiumTier) return "PREMIUM";
+  return "OTHER";
+}
+
+function rewardValueUsdFrom(rewardLabel) {
+  if (isFundedReward(rewardLabel)) return parseFundedUsdValue(rewardLabel);
+  // Premium/Other = no USD value (marketing tool focuses on funded value)
+  return 0;
+}
+
 async function safeFetchCertByCode(code) {
   const c = await findCertificateByCode(code).catch(() => null);
   if (c) return c;
@@ -133,6 +181,49 @@ function staffDeliveredRow(claimId) {
   );
 }
 
+// --- Attach cert to verified giveaways log (best-effort, no crashes) ---
+async function buildCertificateAttachment(cert, code) {
+  const fp = cert?.filePath ? String(cert.filePath) : "";
+  if (!fp) return { files: [], imageUrl: null };
+
+  const isUrl = /^https?:\/\//i.test(fp);
+
+  // If URL: download and attach, then embed image = attachment://...
+  if (isUrl && typeof fetch === "function") {
+    try {
+      const res = await fetch(fp);
+      if (!res.ok) return { files: [], imageUrl: fp }; // fallback to just showing URL
+
+      const ab = await res.arrayBuffer();
+      const buf = Buffer.from(ab);
+
+      // Pick extension from URL if possible
+      const urlPath = fp.split("?")[0];
+      const ext = path.extname(urlPath) || ".png";
+      const name = `certificate-${code}${ext}`;
+
+      const att = new AttachmentBuilder(buf, { name });
+      return { files: [att], imageUrl: `attachment://${name}` };
+    } catch {
+      return { files: [], imageUrl: fp };
+    }
+  }
+
+  // If local path exists: attach
+  try {
+    if (fs.existsSync(fp)) {
+      const name = path.basename(fp) || `certificate-${code}.png`;
+      const att = new AttachmentBuilder(fp, { name });
+      return { files: [att], imageUrl: `attachment://${name}` };
+    }
+  } catch {
+    // ignore
+  }
+
+  // If nothing: no file
+  return { files: [], imageUrl: null };
+}
+
 async function postDeliveredToVerifiedGiveawaysChannel(client, { claim, cert, code }) {
   if (!VERIFIED_GIVEAWAYS_CHANNEL_ID) return;
 
@@ -163,30 +254,17 @@ async function postDeliveredToVerifiedGiveawaysChannel(client, { claim, cert, co
 
   if (LOGO_URL) e.setThumbnail(LOGO_URL);
 
-  // Best-effort attach certificate copy:
-  // - If cert.filePath is a URL, set it as image
-  // - If it’s a local path and exists, attach file
-  const fp = cert?.filePath ? String(cert.filePath) : "";
-  const isUrl = /^https?:\/\//i.test(fp);
+  // Attach certificate if possible
+  const attach = await buildCertificateAttachment(cert, code).catch(() => ({ files: [], imageUrl: null }));
+  if (attach?.imageUrl) e.setImage(attach.imageUrl);
 
-  if (isUrl) {
-    e.setImage(fp);
-    await ch.send({ embeds: [e] }).catch(() => null);
-    return;
-  }
-
-  if (fp && fs.existsSync(fp)) {
-    const att = new AttachmentBuilder(fp);
-    await ch.send({ embeds: [e], files: [att] }).catch(() => null);
-    return;
-  }
-
-  // If we can’t attach, still log the record (no crashes)
-  await ch.send({ embeds: [e] }).catch(() => null);
+  // Always send; never crash the flow
+  await ch.send({ embeds: [e], files: attach?.files || [] }).catch(() => null);
 }
 
 // ---------------- Totals ----------------
-// ✅ Counts are now COMPLETED (delivered), because you want dashboard to update after completion.
+// ✅ Dashboard totals update AFTER delivery is confirmed.
+// ✅ Now sums show real USD delivered.
 async function computeGiveawayTotals() {
   const mkThis = monthKeyUTC();
   const yk = yearKeyUTC();
@@ -197,14 +275,18 @@ async function computeGiveawayTotals() {
   };
 
   const lifetime = await q(
-    `SELECT COUNT(*)::int AS cnt
+    `SELECT
+        COUNT(*)::int AS cnt,
+        COALESCE(SUM(COALESCE(reward_value_usd,0)),0)::numeric AS sum_usd
      FROM public.prop_giveaway_claims
      WHERE delivered_at IS NOT NULL`,
     []
   );
 
   const ytd = await q(
-    `SELECT COUNT(*)::int AS cnt
+    `SELECT
+        COUNT(*)::int AS cnt,
+        COALESCE(SUM(COALESCE(reward_value_usd,0)),0)::numeric AS sum_usd
      FROM public.prop_giveaway_claims
      WHERE delivered_at IS NOT NULL
        AND EXTRACT(YEAR FROM delivered_at) = $1`,
@@ -212,7 +294,9 @@ async function computeGiveawayTotals() {
   );
 
   const thisMonth = await q(
-    `SELECT COUNT(*)::int AS cnt
+    `SELECT
+        COUNT(*)::int AS cnt,
+        COALESCE(SUM(COALESCE(reward_value_usd,0)),0)::numeric AS sum_usd
      FROM public.prop_giveaway_claims
      WHERE delivered_at IS NOT NULL
        AND TO_CHAR(delivered_at AT TIME ZONE 'UTC','YYYY-MM') = $1`,
@@ -230,8 +314,11 @@ async function computeGiveawayTotals() {
     mkThis,
     yk,
     lifetimeCnt: Number(lifetime.cnt || 0),
+    lifetimeUsd: Number(lifetime.sum_usd || 0),
     ytdCnt: Number(ytd.cnt || 0),
+    ytdUsd: Number(ytd.sum_usd || 0),
     monthCnt: Number(thisMonth.cnt || 0),
+    monthUsd: Number(thisMonth.sum_usd || 0),
     pendingCnt: Number(pending.cnt || 0),
   };
 }
@@ -247,9 +334,21 @@ function giveawayDashboardEmbed(t) {
       ].join("\n")
     )
     .addFields(
-      { name: "📅 This Month", value: `• **Delivered Claims:** **${t.monthCnt}**`, inline: true },
-      { name: "📈 Year-to-Date", value: `• **Delivered Claims:** **${t.ytdCnt}**`, inline: true },
-      { name: "🏛️ Lifetime", value: `• **Delivered Claims:** **${t.lifetimeCnt}**`, inline: true },
+      {
+        name: "📅 This Month (Delivered)",
+        value: `• **Amount:** **${fmtMoneyUSD(t.monthUsd)}**\n• **Claims:** **${t.monthCnt}**`,
+        inline: true,
+      },
+      {
+        name: "📈 Year-to-Date (Delivered)",
+        value: `• **Amount:** **${fmtMoneyUSD(t.ytdUsd)}**\n• **Claims:** **${t.ytdCnt}**`,
+        inline: true,
+      },
+      {
+        name: "🏛️ Lifetime (Delivered)",
+        value: `• **Amount:** **${fmtMoneyUSD(t.lifetimeUsd)}**\n• **Claims:** **${t.lifetimeCnt}**`,
+        inline: true,
+      },
       { name: "🛡️ Operations", value: `• **Pending Claims:** **${t.pendingCnt}**`, inline: false }
     )
     .setFooter({ text: `The Ghana Trader Desk • Audited Impact • ${DASH_MARKER}` })
@@ -601,12 +700,17 @@ async function handleGiveawayInteractions(client, interaction) {
 
     const claimId = crypto.randomUUID();
 
+    // ✅ store reward marketing fields at creation time (requires SQL columns added)
+    const rewardType = rewardTypeFrom(rewardLabel);
+    const rewardValueUsd = rewardValueUsdFrom(rewardLabel);
+    const cycleKey = String(cert.monthKey || "").trim() || null;
+
     const ok = await pool
       .query(
         `INSERT INTO public.prop_giveaway_claims
-         (id, serial_code, claimant_user_id, email, status, created_at)
-         VALUES ($1,$2,$3,$4,'pending',NOW())`,
-        [claimId, code, interaction.user.id, email || null]
+         (id, serial_code, claimant_user_id, email, status, created_at, reward_label, reward_type, reward_value_usd, cycle_key)
+         VALUES ($1,$2,$3,$4,'pending',NOW(),$5,$6,$7,$8)`,
+        [claimId, code, interaction.user.id, email || null, rewardLabel || null, rewardType, rewardValueUsd, cycleKey]
       )
       .then(() => true)
       .catch((e) => {
@@ -643,7 +747,7 @@ async function handleGiveawayInteractions(client, interaction) {
           { name: "Email", value: email || "—", inline: false },
           {
             name: "Reward Type",
-            value: funded ? "Funded/Prop Account" : premiumTier ? `Premium Role (${premiumTier})` : "Other",
+            value: funded ? `Funded/Prop Account (${fmtMoneyUSD(rewardValueUsd)})` : premiumTier ? `Premium Role (${premiumTier})` : "Other",
             inline: true,
           }
         )
@@ -740,15 +844,16 @@ async function handleGiveawayInteractions(client, interaction) {
         )
         .catch(() => null);
 
-      // ✅ refresh dashboard counts AFTER completion
-      await ensureGiveawayDashboard(client).catch(() => null);
-
-      // ✅ log certificate copy + details to VERIFIED_GIVEAWAYS_CHANNEL_ID
       const code = normalizeSerial(claim.serial_code);
       const cert = await safeFetchCertByCode(code);
+
+      // ✅ log certificate + details to VERIFIED_GIVEAWAYS_CHANNEL_ID
       if (cert && !cert.legacy) {
         await postDeliveredToVerifiedGiveawaysChannel(client, { claim, cert, code }).catch(() => null);
       }
+
+      // ✅ refresh dashboard totals AFTER completion
+      await ensureGiveawayDashboard(client).catch(() => null);
 
       // ✅ DM winner delivered message
       const user = await client.users.fetch(String(claim.claimant_user_id)).catch(() => null);
@@ -757,13 +862,13 @@ async function handleGiveawayInteractions(client, interaction) {
         const firm = String(claim.firm_name || "the firm");
         const msg =
           method === "VOUCHER"
-            ? `🎉 **Congratulations — Delivered!**\nYour giveaway reward has been delivered.\nFirm: **${firm}**\nIf a voucher/link was provided, follow the instructions you received and proceed.\n\n— The Ghana Trader Desk`
-            : `🎉 **Congratulations — Delivered!**\nYour giveaway reward has been delivered.\nFirm: **${firm}**\nIf this was a CREDIT method, your account should be credited after staff processing.\n\n— The Ghana Trader Desk`;
+            ? `🎉 **Congratulations — Delivered!**\nYour giveaway reward has been delivered.\nFirm: **${firm}**\nFollow the instructions you received.\n\n— The Ghana Trader Desk`
+            : `🎉 **Congratulations — Delivered!**\nYour giveaway reward has been delivered.\nFirm: **${firm}**\nIf this was CREDIT, staff has processed the credit and your account should reflect it.\n\n— The Ghana Trader Desk`;
 
         await user.send(msg).catch(() => null);
       }
 
-      await interaction.editReply("✅ Marked delivered (dashboard updated + logged).").catch(() => null);
+      await interaction.editReply("✅ Marked delivered (dashboard updated + certificate logged).").catch(() => null);
       return true;
     }
 
