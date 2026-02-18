@@ -44,10 +44,19 @@ function topNFromSorted(sortedEntries, n) {
   return sortedEntries.slice(0, n).map(([id], idx) => ({ userId: id, rank: idx + 1 }));
 }
 
-function safeUsernameFromGuild(guild, userId) {
+async function safeUsernameFromGuild(guild, userId) {
   try {
-    const m = guild?.members?.cache?.get(userId);
-    return m?.user?.username || m?.displayName || "member";
+    if (!guild || !userId) return "member";
+
+    // 1) Try cache first (fast)
+    const cached = guild.members?.cache?.get(userId);
+    if (cached) return cached.user?.username || cached.displayName || "member";
+
+    // 2) Fetch from Discord (works even when cache is empty)
+    const fetched = await guild.members.fetch(userId).catch(() => null);
+    if (fetched) return fetched.user?.username || fetched.displayName || "member";
+
+    return "member";
   } catch {
     return "member";
   }
@@ -240,7 +249,7 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
 
     // if (await alreadyIssuedFor({ userId: t.userId, monthKey, category, rankLabel })) continue;
 
-    const username = safeUsernameFromGuild(guild, t.userId);
+    const username = await safeUsernameFromGuild(guild, t.userId);
     const code = genVerificationCode16();
 
     const rewardLabel = String(t.userId) === topSalesWinnerId ? rewards.first : "Top 10 Recognition";
@@ -279,7 +288,7 @@ async function runMonthlyCeremonyCore({ client, monthKeyOverride, reason, dryRun
 
     // if (await alreadyIssuedFor({ userId: t.userId, monthKey, category, rankLabel })) continue;
 
-    const username = safeUsernameFromGuild(guild, t.userId);
+    const username = await safeUsernameFromGuild(guild, t.userId);
     const code = genVerificationCode16();
 
     const rewardLabel = String(t.userId) === topRefWinnerId ? rewards.referral : "Top 10 Recognition";
