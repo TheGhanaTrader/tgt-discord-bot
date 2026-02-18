@@ -48,10 +48,7 @@ const ROLE_DIAMOND_ID = String(process.env.ROLE_DIAMOND_ID || process.env.ROLE_D
 
 // ---------------- Helpers ----------------
 function normalizeSerial(input) {
-  return String(input || "")
-    .trim()
-    .toUpperCase()
-    .replace(/[^A-Z0-9]/g, "");
+  return String(input || "").trim().toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
 function monthKeyUTC(d = new Date()) {
@@ -122,6 +119,15 @@ function staffRow(claimId) {
   );
 }
 
+function staffDeliveredRow(claimId) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId(`giveaway_claim_delivered:${claimId}`)
+      .setLabel("📦 Mark Delivered")
+      .setStyle(ButtonStyle.Primary)
+  );
+}
+
 // ---------------- Totals ----------------
 async function computeGiveawayTotals() {
   const mkThis = monthKeyUTC();
@@ -177,7 +183,7 @@ function giveawayDashboardEmbed(t) {
     .setDescription(
       [
         "Claims are verified using **certificate verification codes** (same as `/verifycert`).",
-        "Staff approvals are logged for auditability.",
+        "Staff approvals + fulfillment are logged for auditability.",
       ].join("\n")
     )
     .addFields(
@@ -326,14 +332,165 @@ function buildClaimModal() {
   return m;
 }
 
+// Staff approval modal: firm + method + voucher/link + instructions
+function buildStaffApproveModal(claimId) {
+  const m = new ModalBuilder()
+    .setCustomId(`giveaway_staff_approve_modal:${claimId}`)
+    .setTitle("Approve Claim — Fulfillment");
+
+  const firm = new TextInputBuilder()
+    .setCustomId("firm")
+    .setLabel("Firm name (required)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  const method = new TextInputBuilder()
+    .setCustomId("method")
+    .setLabel("Method: VOUCHER or CREDIT (required)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  const voucher = new TextInputBuilder()
+    .setCustomId("voucher")
+    .setLabel("Voucher code OR affiliate link (required)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  const instructions = new TextInputBuilder()
+    .setCustomId("instructions")
+    .setLabel("Instructions (short, required)")
+    .setStyle(TextInputStyle.Paragraph)
+    .setRequired(true);
+
+  m.addComponents(
+    new ActionRowBuilder().addComponents(firm),
+    new ActionRowBuilder().addComponents(method),
+    new ActionRowBuilder().addComponents(voucher),
+    new ActionRowBuilder().addComponents(instructions)
+  );
+
+  return m;
+}
+
+// Winner fulfillment email modal (stage 2)
+function buildWinnerEmailModal(claimId) {
+  const m = new ModalBuilder()
+    .setCustomId(`giveaway_winner_email_modal:${claimId}`)
+    .setTitle("Submit Firm Account Email");
+
+  const email = new TextInputBuilder()
+    .setCustomId("email")
+    .setLabel("Email you used on the firm site (required)")
+    .setStyle(TextInputStyle.Short)
+    .setRequired(true);
+
+  m.addComponents(new ActionRowBuilder().addComponents(email));
+  return m;
+}
+
+// ---------------- Core Interaction Handler ----------------
 async function handleGiveawayInteractions(client, interaction) {
-  // Button: open modal
+  // Button: open claim modal
   if (interaction.isButton() && interaction.customId === "giveaway_claim") {
     await interaction.showModal(buildClaimModal());
     return true;
   }
 
-  // Modal submit
+  // Winner button: submit firm email
+  if (interaction.isButton() && typeof interaction.customId === "string") {
+    const id = interaction.customId;
+    const prefix = "giveaway_submit_firm_email:";
+    if (id.startsWith(prefix)) {
+      const claimId = id.split(":")[1];
+      if (!claimId) return false;
+      await interaction.showModal(buildWinnerEmailModal(claimId));
+      return true;
+    }
+  }
+
+  // Winner modal: submit firm email (stage 2)
+  if (interaction.isModalSubmit() && typeof interaction.customId === "string") {
+    const id = interaction.customId;
+    const prefix = "giveaway_winner_email_modal:";
+    if (id.startsWith(prefix)) {
+      const claimId = id.split(":")[1];
+      const email = String(interaction.fields.getTextInputValue("email") || "").trim();
+
+      if (!claimId || !email) {
+        await interaction.reply({ content: "❌ Email is required.", ephemeral: true });
+        return true;
+      }
+
+      // Load claim, ensure approved, ensure owner matches
+      const claim = await pool
+        .query(
+          `SELECT id, claimant_user_id, status, firm_name, fulfillment_method, voucher_code, staff_instructions, serial_code
+           FROM public.prop_giveaway_claims
+           WHERE id=$1
+           LIMIT 1`,
+          [claimId]
+        )
+        .then((r) => r.rows?.[0] || null)
+        .catch(() => null);
+
+      if (!claim) {
+        await interaction.reply({ content: "❌ Claim not found.", ephemeral: true });
+        return true;
+      }
+
+      if (String(claim.claimant_user_id) !== String(interaction.user.id)) {
+        await interaction.reply({ content: "❌ This fulfillment link is not for your account.", ephemeral: true });
+        return true;
+      }
+
+      if (String(claim.status) !== "approved") {
+        await interaction.reply({ content: "⚠️ This claim is not approved yet.", ephemeral: true });
+        return true;
+      }
+
+      // Save fulfillment email
+      await pool
+        .query(
+          `UPDATE public.prop_giveaway_claims
+           SET fulfillment_email=$2
+           WHERE id=$1`,
+          [claimId, email]
+        )
+        .catch(() => null);
+
+      // Post to staff queue: Fulfillment Ready
+      const q = await client.channels.fetch(REVIEW_QUEUE_ID).catch(() => null);
+      if (q && q.isTextBased()) {
+        const e = new EmbedBuilder()
+          .setTitle("📨 Fulfillment Ready — Winner Submitted Email")
+          .setDescription(`Claim ID: \`${claimId}\``)
+          .addFields(
+            { name: "Member", value: `<@${interaction.user.id}>`, inline: true },
+            { name: "Firm", value: String(claim.firm_name || "—"), inline: true },
+            { name: "Method", value: String(claim.fulfillment_method || "—"), inline: true },
+            { name: "Voucher / Link", value: String(claim.voucher_code || "—").slice(0, 900), inline: false },
+            { name: "Instructions", value: String(claim.staff_instructions || "—").slice(0, 900), inline: false },
+            { name: "Winner Email", value: email, inline: false },
+            { name: "Certificate Code", value: `\`${normalizeSerial(claim.serial_code)}\``, inline: false }
+          )
+          .setColor(0xc9a24d)
+          .setTimestamp(new Date());
+
+        if (LOGO_URL) e.setThumbnail(LOGO_URL);
+
+        await q.send({ embeds: [e], components: [staffDeliveredRow(claimId)] }).catch(() => null);
+      }
+
+      await interaction.reply({
+        content: "✅ Submitted. Staff will complete fulfillment and confirm delivery.",
+        ephemeral: true,
+      });
+
+      return true;
+    }
+  }
+
+  // Claim modal submit (stage 0)
   if (interaction.isModalSubmit() && interaction.customId === "giveaway_claim_modal") {
     const serialRaw = String(interaction.fields.getTextInputValue("serial") || "").trim();
     const code = normalizeSerial(serialRaw);
@@ -388,7 +545,6 @@ async function handleGiveawayInteractions(client, interaction) {
 
     const claimId = crypto.randomUUID();
 
-    // Insert pending claim (DB-enforced idempotency via unique(serial_code))
     const ok = await pool
       .query(
         `INSERT INTO public.prop_giveaway_claims
@@ -458,18 +614,21 @@ async function handleGiveawayInteractions(client, interaction) {
     return true;
   }
 
-  // Staff approve/reject
+  // Staff approve/reject/delivered
   if (interaction.isButton() && typeof interaction.customId === "string") {
     const id = interaction.customId;
 
     const approvePrefix = "giveaway_claim_approve:";
     const rejectPrefix = "giveaway_claim_reject:";
+    const deliveredPrefix = "giveaway_claim_delivered:";
 
     const isApprove = id.startsWith(approvePrefix);
     const isReject = id.startsWith(rejectPrefix);
-    if (!isApprove && !isReject) return false;
+    const isDelivered = id.startsWith(deliveredPrefix);
 
-    // Acknowledge immediately to prevent "interaction failed"
+    if (!isApprove && !isReject && !isDelivered) return false;
+
+    // Acknowledge immediately
     await interaction.deferReply({ ephemeral: true }).catch(() => null);
 
     const claimId = id.split(":")[1];
@@ -478,9 +637,51 @@ async function handleGiveawayInteractions(client, interaction) {
       return true;
     }
 
+    // Delivered action
+    if (isDelivered) {
+      const claim = await pool
+        .query(
+          `SELECT id, status, delivered_at
+           FROM public.prop_giveaway_claims
+           WHERE id=$1
+           LIMIT 1`,
+          [claimId]
+        )
+        .then((r) => r.rows?.[0] || null)
+        .catch(() => null);
+
+      if (!claim) {
+        await interaction.editReply("❌ Claim not found.").catch(() => null);
+        return true;
+      }
+
+      if (claim.delivered_at) {
+        await interaction.editReply("⚠️ Already marked delivered.").catch(() => null);
+        return true;
+      }
+
+      if (String(claim.status) !== "approved") {
+        await interaction.editReply("⚠️ Claim must be approved before delivery.").catch(() => null);
+        return true;
+      }
+
+      await pool
+        .query(
+          `UPDATE public.prop_giveaway_claims
+           SET delivered_at=NOW(), delivered_by=$2
+           WHERE id=$1`,
+          [claimId, interaction.user.id]
+        )
+        .catch(() => null);
+
+      await interaction.editReply("✅ Marked delivered.").catch(() => null);
+      return true;
+    }
+
+    // Load claim
     const claim = await pool
       .query(
-        `SELECT id, serial_code, claimant_user_id, email, status
+        `SELECT id, serial_code, claimant_user_id, email, status, firm_name, fulfillment_method, voucher_code, staff_instructions, fulfillment_email
          FROM public.prop_giveaway_claims
          WHERE id=$1
          LIMIT 1`,
@@ -535,7 +736,76 @@ async function handleGiveawayInteractions(client, interaction) {
       return true;
     }
 
-    // Approve path
+    // Approve clicked -> open staff modal (fulfillment details)
+    await interaction.editReply("✅ Opening approval form...").catch(() => null);
+    await interaction.followUp({ content: "Fill the approval form to finalize.", ephemeral: true }).catch(() => null);
+    await interaction.showModal(buildStaffApproveModal(claimId)).catch(() => null);
+    return true;
+  }
+
+  // Staff approval modal submit (finalize approve + DM winner + stage2 button)
+  if (interaction.isModalSubmit() && typeof interaction.customId === "string") {
+    const id = interaction.customId;
+    const prefix = "giveaway_staff_approve_modal:";
+    if (!id.startsWith(prefix)) return false;
+
+    const claimId = id.split(":")[1];
+    if (!claimId) return false;
+
+    const firm = String(interaction.fields.getTextInputValue("firm") || "").trim();
+    const methodRaw = String(interaction.fields.getTextInputValue("method") || "").trim().toUpperCase();
+    const voucher = String(interaction.fields.getTextInputValue("voucher") || "").trim();
+    const instructions = String(interaction.fields.getTextInputValue("instructions") || "").trim();
+
+    if (!firm || !methodRaw || !voucher || !instructions) {
+      await interaction.reply({ content: "❌ All fields are required.", ephemeral: true });
+      return true;
+    }
+
+    const method = methodRaw === "VOUCHER" ? "VOUCHER" : methodRaw === "CREDIT" ? "CREDIT" : null;
+    if (!method) {
+      await interaction.reply({ content: "❌ Method must be VOUCHER or CREDIT.", ephemeral: true });
+      return true;
+    }
+
+    // Load claim fresh (must still be pending)
+    const claim = await pool
+      .query(
+        `SELECT id, serial_code, claimant_user_id, email, status
+         FROM public.prop_giveaway_claims
+         WHERE id=$1
+         LIMIT 1`,
+        [claimId]
+      )
+      .then((r) => r.rows?.[0] || null)
+      .catch(() => null);
+
+    if (!claim) {
+      await interaction.reply({ content: "❌ Claim not found.", ephemeral: true });
+      return true;
+    }
+
+    if (String(claim.status) !== "pending") {
+      await interaction.reply({ content: "⚠️ This claim has already been processed.", ephemeral: true });
+      return true;
+    }
+
+    const code = normalizeSerial(claim.serial_code);
+    const cert = await safeFetchCertByCode(code);
+
+    if (!cert || cert.legacy) {
+      await pool.query(`UPDATE public.prop_giveaway_claims SET status='rejected' WHERE id=$1`, [claimId]).catch(() => null);
+      await interaction.reply({ content: "❌ Certificate not found/legacy. Claim rejected.", ephemeral: true });
+      return true;
+    }
+
+    // Owner re-check
+    if (String(cert.userId || "") !== String(claim.claimant_user_id || "")) {
+      await pool.query(`UPDATE public.prop_giveaway_claims SET status='rejected' WHERE id=$1`, [claimId]).catch(() => null);
+      await interaction.reply({ content: "❌ Owner mismatch detected. Claim rejected.", ephemeral: true });
+      return true;
+    }
+
     const rewardLabel = String(cert.rewardLabel || "").trim();
     const funded = isFundedReward(rewardLabel);
     const premiumTier = parsePremiumTier(rewardLabel);
@@ -571,32 +841,58 @@ async function handleGiveawayInteractions(client, interaction) {
       }
     }
 
-    // Mark claim approved in DB (permanent memory)
+    // Approve + store fulfillment assignment
     await pool
       .query(
         `UPDATE public.prop_giveaway_claims
-         SET status='approved', decided_at=NOW(), decided_by=$2
+         SET status='approved',
+             decided_at=NOW(),
+             decided_by=$2,
+             firm_name=$3,
+             fulfillment_method=$4,
+             voucher_code=$5,
+             staff_instructions=$6
          WHERE id=$1`,
-        [claimId, interaction.user.id]
+        [claimId, interaction.user.id, firm, method, voucher, instructions]
       )
       .catch(() => null);
 
-    await interaction.editReply("✅ Approved.").catch(() => null);
-
+    // DM winner with stage2 button
     const user = await client.users.fetch(String(claim.claimant_user_id)).catch(() => null);
     if (user) {
-      const extra =
-        premiumTier
-          ? `\nRole: ${roleAction.replace(/_/g, " ")}`
-          : funded
-          ? `\nStaff will proceed with account setup.`
-          : ``;
+      const methodLine =
+        method === "VOUCHER"
+          ? `**Voucher/Link:** ${voucher}`
+          : `**Affiliate Link / Tracking:** ${voucher}`;
 
-      await user
-        .send(`✅ Your claim was approved.\nCertificate Code: ${code}\nReward: ${rewardLabel || "—"}${extra}`)
-        .catch(() => null);
+      const extraRole =
+        premiumTier ? `\n**Role:** ${roleAction.replace(/_/g, " ")}` : "";
+
+      const msg = [
+        "✅ **Claim Approved — Next Step Required**",
+        "",
+        `**Reward:** ${rewardLabel || "—"}`,
+        `**Firm:** ${firm}`,
+        `**Method:** ${method}`,
+        methodLine,
+        "",
+        `**Instructions:** ${instructions}`,
+        "",
+        "Now create your account on the firm site (if required), then submit the email you used:",
+        extraRole,
+      ].filter(Boolean).join("\n");
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+          .setCustomId(`giveaway_submit_firm_email:${claimId}`)
+          .setLabel("📩 Submit Firm Email")
+          .setStyle(ButtonStyle.Primary)
+      );
+
+      await user.send({ content: msg, components: [row] }).catch(() => null);
     }
 
+    await interaction.reply({ content: "✅ Approved + fulfillment assigned.", ephemeral: true });
     return true;
   }
 
