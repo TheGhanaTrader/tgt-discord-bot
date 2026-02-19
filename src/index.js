@@ -18,6 +18,9 @@ const { ensureFundedDashboard, handleFundedInteractions } = require("./services/
 const { ensurePayoutDashboard, handlePayoutInteractions } = require("./services/payoutProofs");
 const { ensureContractGateMessage } = require("./services/contractGatePoster");
 
+// ✅ DAILY BACKUP (NEW)
+const { startDailyBackupJob } = require("./jobs/dailyBackupJob");
+
 const fs = require("fs");
 const path = require("path");
 
@@ -205,6 +208,9 @@ const { upsertOperateMessage } = require("./gates/operateGate");
 if (process.env.RULES_CHANNEL_ID) await upsertRulesMessage(client);
 if (process.env.OPERATE_CHANNEL_ID) await upsertOperateMessage(client);
 console.log("✅ Pins managed: welcome/upgrade/rules/operate");
+
+// ✅ DAILY BACKUP (NEW) — start once after bot is fully ready
+startDailyBackupJob(client);
 
 // ✅ Leaderboard dashboards (auto-post + auto-pin + auto-refresh)
 const { startLeaderboardDashboards } = require("./services/leaderboards");
