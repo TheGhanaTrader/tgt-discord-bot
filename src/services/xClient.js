@@ -11,11 +11,20 @@ const client = new TwitterApi({
   accessSecret: process.env.X_ACCESS_TOKEN_SECRET,
 });
 
-// One-time boot signal so we can confirm the deployed code version
+// Diagnostics
 const _rsshubBase = String(process.env.RSSHUB_BASE_URL || "https://rsshub.app")
   .trim()
   .replace(/\/+$/, "");
-console.log("✅ X_CLIENT_BOOT: RSSHub enabled", { RSSHUB_BASE_URL: _rsshubBase });
+
+const _ua =
+  String(process.env.X_FEED_USER_AGENT || "").trim() ||
+  // default: realistic browser UA
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36";
+
+console.log("✅ X_CLIENT_BOOT", {
+  RSSHUB_BASE_URL: _rsshubBase,
+  X_FEED_USER_AGENT: process.env.X_FEED_USER_AGENT ? "custom" : "default",
+});
 
 // -------------------- Helpers --------------------
 function cleanUsername(username) {
@@ -106,7 +115,7 @@ function parseFeed(xml) {
   return parseFirstRssItem(xml) || parseFirstAtomEntry(xml) || null;
 }
 
-async function fetchWithTimeout(url, ms = 9000) {
+async function fetchWithTimeout(url, ms = 10000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
   try {
@@ -115,8 +124,8 @@ async function fetchWithTimeout(url, ms = 9000) {
       signal: ctrl.signal,
       redirect: "follow",
       headers: {
-        "user-agent":
-          "Mozilla/5.0 (compatible; TheGhanaTraderDeskBot/1.0; +https://example.invalid)",
+        "user-agent": _ua,
+        "accept-language": "en-US,en;q=0.9",
         accept:
           "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.5",
       },
@@ -128,24 +137,15 @@ async function fetchWithTimeout(url, ms = 9000) {
   }
 }
 
-// -------------------- RSS/Atom fallback sources --------------------
+// -------------------- Fallback sources --------------------
 
-// RSSHub route patterns for Twitter/X vary by deployment/version.
-// We'll try a small list and use the first that works.
+// A) RSSHub (keep, but often broken for Twitter)
 function rsshubCandidateUrls(base, username) {
   const u = encodeURIComponent(username);
-
   return [
-    // Common older route
     `${base}/twitter/user/${u}`,
-
-    // Common route name used by many RSSHub builds
     `${base}/x/user/${u}`,
-
-    // Some builds use /twitter/profile
     `${base}/twitter/profile/${u}`,
-
-    // Some builds use /twitter/status/user
     `${base}/twitter/status/user/${u}`,
   ];
 }
@@ -154,50 +154,124 @@ async function getLatestViaRssHub(username) {
   const u = cleanUsername(username);
   if (!u) return null;
 
-  const base = _rsshubBase;
-
-  for (const url of rsshubCandidateUrls(base, u)) {
+  for (const url of rsshubCandidateUrls(_rsshubBase, u)) {
     console.log("🔎 X_RSSHUB_FETCH:", url);
-
     try {
       const r = await fetchWithTimeout(url, 10000);
       if (!r.ok || !r.text) {
         console.log("⚠️ X_RSSHUB_BAD_RESPONSE:", r.status, url);
         continue;
       }
-
       const parsed = parseFeed(r.text);
-      if (parsed && parsed.id) return parsed;
-
+      if (parsed?.id) return parsed;
       console.log("⚠️ X_RSSHUB_PARSE_FAILED:", url);
     } catch (e) {
       console.log("⚠️ X_RSSHUB_FETCH_FAILED:", e?.message || e, url);
+    }
+  }
+  return null;
+}
+
+// B) XCancel RSS (often works when RSSHub doesn't)
+async function getLatestViaXCancel(username) {
+  const u = cleanUsername(username);
+  if (!u) return null;
+
+  const url = `https://xcancel.com/${encodeURIComponent(u)}/rss`;
+  console.log("🔎 X_XCANCEL_FETCH:", url);
+
+  try {
+    const r = await fetchWithTimeout(url, 10000);
+    if (!r.ok || !r.text) {
+      console.log("⚠️ X_XCANCEL_BAD_RESPONSE:", r.status);
+      return null;
+    }
+
+    const parsed = parseFeed(r.text);
+    if (parsed?.id) return parsed;
+
+    console.log("⚠️ X_XCANCEL_PARSE_FAILED");
+    return null;
+  } catch (e) {
+    console.log("⚠️ X_XCANCEL_FETCH_FAILED:", e?.message || e);
+    return null;
+  }
+}
+
+// C) Direct Nitter instances (optional override)
+function getNitterInstances() {
+  const env = String(process.env.NITTER_INSTANCES || "").trim();
+  if (env) {
+    return env
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) => (s.startsWith("http") ? s : `https://${s}`))
+      .map((s) => s.replace(/\/+$/, ""));
+  }
+
+  // small defaults; may be blocked/rate-limited
+  return [
+    "https://nitter.blahaj.land",
+    "https://nitter.batsense.net",
+    "https://nitter.buntcomm.com",
+    "https://nitter.cabletemple.net",
+    "https://nitter.asmallr.tech",
+    "https://nitter.privacydev.net",
+    "https://nitter.fdn.fr",
+    "https://nitter.cz",
+  ];
+}
+
+async function getLatestViaNitter(username) {
+  const u = cleanUsername(username);
+  if (!u) return null;
+
+  for (const base of getNitterInstances()) {
+    const url = `${base}/${encodeURIComponent(u)}/rss`;
+    console.log("🔎 X_NITTER_FETCH:", url);
+
+    try {
+      const r = await fetchWithTimeout(url, 10000);
+      if (!r.ok || !r.text) {
+        console.log("⚠️ X_NITTER_BAD_RESPONSE:", r.status, base);
+        continue;
+      }
+
+      const parsed = parseFeed(r.text);
+      if (parsed?.id) return parsed;
+
+      console.log("⚠️ X_NITTER_PARSE_FAILED:", base);
+    } catch (e) {
+      console.log("⚠️ X_NITTER_FETCH_FAILED:", e?.message || e, base);
     }
   }
 
   return null;
 }
 
-// Twiiit (backup only)
+// D) Twiiit (backup only)
 async function getLatestViaTwiiit(username) {
   const u = cleanUsername(username);
   if (!u) return null;
 
   const url = `https://twiiit.com/${encodeURIComponent(u)}/rss`;
+  console.log("🔎 X_TWIIIT_FETCH:", url);
+
   try {
     const r = await fetchWithTimeout(url, 10000);
     if (!r.ok || !r.text) {
-      console.log("⚠️ X_RSS_TWIIIT_BAD_RESPONSE:", r.status);
+      console.log("⚠️ X_TWIIIT_BAD_RESPONSE:", r.status);
       return null;
     }
 
     const parsed = parseFeed(r.text);
-    if (parsed && parsed.id) return parsed;
+    if (parsed?.id) return parsed;
 
-    console.log("⚠️ X_RSS_TWIIIT_PARSE_FAILED");
+    console.log("⚠️ X_TWIIIT_PARSE_FAILED");
     return null;
   } catch (e) {
-    console.log("⚠️ X_RSS_TWIIIT_FETCH_FAILED:", e?.message || e);
+    console.log("⚠️ X_TWIIIT_FETCH_FAILED:", e?.message || e);
     return null;
   }
 }
@@ -238,11 +312,19 @@ async function getLatestTweetByUsername(username) {
     console.log("⚠️ X_API_READ_FAILED (fallback to RSS):", e?.message || e);
   }
 
-  // 2) RSSHub fallback (route autodetect)
+  // 2) XCancel RSS (best shot right now)
+  const xc = await getLatestViaXCancel(u);
+  if (xc?.id) return xc;
+
+  // 3) RSSHub (often broken for Twitter)
   const rh = await getLatestViaRssHub(u);
   if (rh?.id) return rh;
 
-  // 3) Twiiit fallback (backup)
+  // 4) Nitter instances
+  const ni = await getLatestViaNitter(u);
+  if (ni?.id) return ni;
+
+  // 5) Twiiit
   const tw = await getLatestViaTwiiit(u);
   if (tw?.id) return tw;
 
