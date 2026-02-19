@@ -257,6 +257,8 @@ async function runBackupOnce(client) {
     files: zipStatus,
     uploads,
   });
+
+  console.log("✅ DAILY_BACKUP_UPLOADS_JSON:", JSON.stringify(uploads, null, 2));
 }
 
 let _timer = null;
