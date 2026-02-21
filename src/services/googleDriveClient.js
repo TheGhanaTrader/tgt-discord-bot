@@ -14,6 +14,16 @@ function getEnv(name, fallback = "") {
   return v || fallback;
 }
 
+function hasEnv(name) {
+  return Boolean(String(process.env[name] || "").trim());
+}
+
+/**
+ * --- Auth mode selection ---
+ * 1) Prefer OAuth (your Gmail) when refresh token exists
+ * 2) Fallback to Service Account if present (for safe transition)
+ */
+
 function parseServiceAccountJson() {
   const raw = mustGetEnv("GDRIVE_SERVICE_ACCOUNT_JSON");
 
@@ -29,14 +39,14 @@ function parseServiceAccountJson() {
 
   try {
     return JSON.parse(txt);
-  } catch (e) {
+  } catch {
     throw new Error(
       "GDRIVE_SERVICE_ACCOUNT_JSON is not valid JSON (or valid base64 JSON)."
     );
   }
 }
 
-function createDrive() {
+function createDriveViaServiceAccount() {
   const sa = parseServiceAccountJson();
 
   const auth = new google.auth.JWT({
@@ -46,6 +56,52 @@ function createDrive() {
   });
 
   return google.drive({ version: "v3", auth });
+}
+
+function createDriveViaOAuth() {
+  const clientId = mustGetEnv("GDRIVE_OAUTH_CLIENT_ID");
+  const clientSecret = mustGetEnv("GDRIVE_OAUTH_CLIENT_SECRET");
+  const redirectUri = mustGetEnv("GDRIVE_OAUTH_REDIRECT_URI");
+
+  const refreshToken = String(process.env.GDRIVE_OAUTH_REFRESH_TOKEN || "").trim();
+  if (!refreshToken) {
+    // We intentionally do NOT try to run interactive auth here.
+    // Next step will generate the refresh token and you’ll paste it into Railway.
+    throw new Error(
+      "Missing env: GDRIVE_OAUTH_REFRESH_TOKEN (OAuth client is set, but refresh token not added yet)."
+    );
+  }
+
+  const auth = new google.auth.OAuth2(clientId, clientSecret, redirectUri);
+  auth.setCredentials({ refresh_token: refreshToken });
+
+  return google.drive({ version: "v3", auth });
+}
+
+function createDrive() {
+  // Prefer OAuth if configured (your Gmail Drive)
+  const hasOAuthCore =
+    hasEnv("GDRIVE_OAUTH_CLIENT_ID") &&
+    hasEnv("GDRIVE_OAUTH_CLIENT_SECRET") &&
+    hasEnv("GDRIVE_OAUTH_REDIRECT_URI");
+
+  if (hasOAuthCore && hasEnv("GDRIVE_OAUTH_REFRESH_TOKEN")) {
+    return createDriveViaOAuth();
+  }
+
+  // Safe fallback: service account (during transition)
+  if (hasEnv("GDRIVE_SERVICE_ACCOUNT_JSON")) {
+    return createDriveViaServiceAccount();
+  }
+
+  // If OAuth core exists but refresh token missing, throw the correct next-step error
+  if (hasOAuthCore) {
+    return createDriveViaOAuth(); // will throw Missing refresh token
+  }
+
+  throw new Error(
+    "Google Drive auth not configured. Set OAuth vars (preferred) or GDRIVE_SERVICE_ACCOUNT_JSON."
+  );
 }
 
 async function findFolderByName(drive, name) {
@@ -159,10 +215,7 @@ async function uploadFileToFolder(drive, folderId, localPath, driveName, mime) {
 }
 
 async function listChildren(drive, folderId) {
-  const q = [
-    `'${folderId}' in parents`,
-    "trashed=false",
-  ].join(" and ");
+  const q = [`'${folderId}' in parents`, "trashed=false"].join(" and ");
 
   const res = await drive.files.list({
     q,
