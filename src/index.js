@@ -60,6 +60,9 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+
+     // ✅ Needed for Discord Scheduled Events mirroring (safe, additive)
+    GatewayIntentBits.GuildScheduledEvents,
   ],
 });
 
@@ -222,6 +225,9 @@ startSubscriptionMonitor(client, {
   LOG_CHANNEL_ID: process.env.BILLING_LOG_CHANNEL_ID || process.env.LOG_CHANNEL_ID,
   DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID,
 });
+
+// ✅ Discord Events -> Announcements mirroring (OFF by default)
+  startDiscordEventsMirror(client);
 });
 
 client.on("guildMemberAdd", async (member) => {
