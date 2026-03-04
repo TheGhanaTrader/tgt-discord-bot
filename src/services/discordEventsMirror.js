@@ -54,7 +54,26 @@ function getEventUrl(ev) {
 }
 
 function getStatusLabel(status) {
-  // statuses: SCHEDULED, ACTIVE, COMPLETED, CANCELED
+  // Discord API enum (commonly returned as number in discord.js):
+  // 1 = SCHEDULED, 2 = ACTIVE, 3 = COMPLETED, 4 = CANCELED
+  if (typeof status === "number") {
+    if (status === 1) return "scheduled";
+    if (status === 2) return "live";
+    if (status === 3) return "ended";
+    if (status === 4) return "canceled";
+    return String(status);
+  }
+
+  // sometimes status may arrive as a numeric string e.g. "1"
+  const n = Number(status);
+  if (Number.isFinite(n) && String(status).trim() !== "") {
+    if (n === 1) return "scheduled";
+    if (n === 2) return "live";
+    if (n === 3) return "ended";
+    if (n === 4) return "canceled";
+  }
+
+  // string statuses: SCHEDULED, ACTIVE, COMPLETED, CANCELED
   const s = String(status || "").toUpperCase();
   if (s === "SCHEDULED") return "scheduled";
   if (s === "ACTIVE") return "live";
@@ -223,7 +242,15 @@ function startDiscordEventsMirror(client) {
       if (!id) return;
 
       const status = getStatusLabel(ev?.status);
-      // On create we only post if status is scheduled/upcoming (Discord calls it SCHEDULED)
+
+      console.log("🔎 EVENTS_MIRROR_CREATE_SEEN:", {
+        id,
+        rawStatus: ev?.status,
+        status,
+        name: safeTrim(ev?.name, 80),
+      });
+
+      // On create we only post if status is scheduled/upcoming
       if (status !== "scheduled") {
         // still record it so status transitions work later
         st.events[id] = {
