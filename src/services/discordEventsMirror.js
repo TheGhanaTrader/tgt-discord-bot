@@ -26,8 +26,7 @@ function fmtTs(ms) {
 }
 
 function getEventTypeLabel(ev) {
-  // Discord.js scheduled event entity types:
-  // 1 = stage, 2 = voice, 3 = external (per Discord API)
+  // 1 = stage, 2 = voice, 3 = external (Discord API)
   const t = Number(ev?.entityType);
   if (t === 3) return "External";
   if (t === 2) return "Voice";
@@ -42,48 +41,17 @@ function getEventLocation(ev) {
     return loc ? `📍 ${safeTrim(loc, 140)}` : "";
   }
 
-  // Voice/Stage: channelId exists
   const chId = String(ev?.channelId || "").trim();
   return chId ? `🔊 <#${chId}>` : "";
 }
 
 function getEventUrl(ev) {
-  // scheduled event has .url in discord.js
   const u = String(ev?.url || "").trim();
   return u || "";
 }
 
-function getStatusLabel(status) {
-  // Discord API enum (commonly returned as number in discord.js):
-  // 1 = SCHEDULED, 2 = ACTIVE, 3 = COMPLETED, 4 = CANCELED
-  if (typeof status === "number") {
-    if (status === 1) return "scheduled";
-    if (status === 2) return "live";
-    if (status === 3) return "ended";
-    if (status === 4) return "canceled";
-    return String(status);
-  }
-
-  // sometimes status may arrive as a numeric string e.g. "1"
-  const n = Number(status);
-  if (Number.isFinite(n) && String(status).trim() !== "") {
-    if (n === 1) return "scheduled";
-    if (n === 2) return "live";
-    if (n === 3) return "ended";
-    if (n === 4) return "canceled";
-  }
-
-  // string statuses: SCHEDULED, ACTIVE, COMPLETED, CANCELED
-  const s = String(status || "").toUpperCase();
-  if (s === "SCHEDULED") return "scheduled";
-  if (s === "ACTIVE") return "live";
-  if (s === "COMPLETED") return "ended";
-  if (s === "CANCELED" || s === "CANCELLED") return "canceled";
-  return s.toLowerCase() || "unknown";
-}
-
 function shouldMirror(ev) {
-  // User asked: mirror both voice + external. We allow stage too as “voice-like”.
+  // mirror stage + voice + external
   const t = Number(ev?.entityType);
   return t === 1 || t === 2 || t === 3;
 }
@@ -105,7 +73,6 @@ function getPingText() {
           process.env.VERIFIED_ROLE_ID ||
           ""
       ).trim();
-
     return roleId ? `<@&${roleId}>` : "";
   }
 
@@ -116,17 +83,15 @@ async function loadState() {
   const row = await getJob(JOB_KEY).catch(() => null);
   const st = row?.state || {};
   return {
-    // eventId -> { lastStatus, lastPostedAtMs }
     events: st.events && typeof st.events === "object" ? st.events : {},
   };
 }
 
 async function saveState(state) {
-  // prune map to avoid unbounded growth
   const events = state.events || {};
   const keys = Object.keys(events);
+
   if (keys.length > 200) {
-    // Keep most recent 200 by lastPostedAtMs
     const sorted = keys
       .map((k) => ({ k, ts: Number(events[k]?.lastPostedAtMs || 0) }))
       .sort((a, b) => b.ts - a.ts)
@@ -150,7 +115,7 @@ async function sendAnnouncement(client, text) {
 
   if (!ch || !ch.isTextBased()) return { ok: false, reason: "announcements_channel_not_text" };
 
-  await ch.send(text).catch((e) => {
+  await ch.send({ content: text, allowedMentions: { parse: ["everyone", "roles"] } }).catch((e) => {
     console.log("❌ EVENTS_MIRROR_SEND_FAILED:", e?.message || e);
   });
 
@@ -159,7 +124,7 @@ async function sendAnnouncement(client, text) {
 
 function buildCreatedMsg(ev) {
   const ping = getPingText();
-  const title = safeTrim(ev?.name || "Scheduled Event", 180);
+  const title = safeTrim(ev?.name || "Discord Event", 180);
   const type = getEventTypeLabel(ev);
   const when = fmtTs(ev?.scheduledStartTimestamp);
   const where = getEventLocation(ev);
@@ -212,8 +177,7 @@ function buildEndedMsg(ev, canceled = false) {
 }
 
 /**
- * Start Discord Events -> Announcements mirroring (guarded).
- * OFF by default. Enable by setting:
+ * Enable by:
  *   DISCORD_EVENTS_MIRROR_ENABLED=true
  * Requires:
  *   ANNOUNCEMENTS_CHANNEL_ID
@@ -237,36 +201,25 @@ function startDiscordEventsMirror(client) {
     try {
       if (!shouldMirror(ev)) return;
 
-      const st = await loadState();
       const id = String(ev?.id || "").trim();
       if (!id) return;
 
-      const status = getStatusLabel(ev?.status);
+      const st = await loadState();
+
+      // Dedupe: if we already posted for this event id, skip
+      const prev = st.events[id];
+      if (prev?.lastStatus === "created") return;
 
       console.log("🔎 EVENTS_MIRROR_CREATE_SEEN:", {
         id,
-        rawStatus: ev?.status,
-        status,
+        entityType: ev?.entityType,
         name: safeTrim(ev?.name, 80),
+        url: getEventUrl(ev),
       });
 
-      // On create we only post if status is scheduled/upcoming
-      if (status !== "scheduled") {
-        // still record it so status transitions work later
-        st.events[id] = {
-          lastStatus: status,
-          lastPostedAtMs: Number(st.events[id]?.lastPostedAtMs || 0),
-        };
-        await saveState(st);
-        return;
-      }
-
-      // Dedupe: if we already posted scheduled for this event, skip
-      const prev = st.events[id];
-      if (prev?.lastStatus === "scheduled") return;
-
       await sendAnnouncement(client, buildCreatedMsg(ev));
-      st.events[id] = { lastStatus: "scheduled", lastPostedAtMs: Date.now() };
+
+      st.events[id] = { lastStatus: "created", lastPostedAtMs: Date.now() };
       await saveState(st);
 
       console.log("✅ EVENTS_MIRROR_POSTED_CREATED:", id);
@@ -280,25 +233,18 @@ function startDiscordEventsMirror(client) {
       const ev = newEv || oldEv;
       if (!shouldMirror(ev)) return;
 
-      const st = await loadState();
       const id = String(ev?.id || "").trim();
       if (!id) return;
 
-      const prevStatus = getStatusLabel(oldEv?.status);
-      const curStatus = getStatusLabel(newEv?.status);
+      // Discord API enum: 1 scheduled, 2 active, 3 completed, 4 canceled
+      const prevN = Number(oldEv?.status);
+      const curN = Number(newEv?.status);
 
-      // If status did not change, do nothing (prevents spam on minor edits)
-      if (prevStatus === curStatus) return;
+      if (Number.isFinite(prevN) && Number.isFinite(curN) && prevN === curN) return;
 
-      if (curStatus === "scheduled") {
-        await sendAnnouncement(client, buildCreatedMsg(newEv));
-        st.events[id] = { lastStatus: "scheduled", lastPostedAtMs: Date.now() };
-        await saveState(st);
-        console.log("✅ EVENTS_MIRROR_POSTED_CREATED(update):", id);
-        return;
-      }
+      const st = await loadState();
 
-      if (curStatus === "live") {
+      if (curN === 2) {
         await sendAnnouncement(client, buildLiveMsg(newEv));
         st.events[id] = { lastStatus: "live", lastPostedAtMs: Date.now() };
         await saveState(st);
@@ -306,7 +252,7 @@ function startDiscordEventsMirror(client) {
         return;
       }
 
-      if (curStatus === "ended") {
+      if (curN === 3) {
         await sendAnnouncement(client, buildEndedMsg(newEv, false));
         st.events[id] = { lastStatus: "ended", lastPostedAtMs: Date.now() };
         await saveState(st);
@@ -314,17 +260,13 @@ function startDiscordEventsMirror(client) {
         return;
       }
 
-      if (curStatus === "canceled") {
+      if (curN === 4) {
         await sendAnnouncement(client, buildEndedMsg(newEv, true));
         st.events[id] = { lastStatus: "canceled", lastPostedAtMs: Date.now() };
         await saveState(st);
         console.log("✅ EVENTS_MIRROR_POSTED_CANCELED:", id);
         return;
       }
-
-      // Unknown status: record only
-      st.events[id] = { lastStatus: curStatus, lastPostedAtMs: Date.now() };
-      await saveState(st);
     } catch (e) {
       console.log("❌ EVENTS_MIRROR_UPDATE_ERR:", e?.message || e);
     }
