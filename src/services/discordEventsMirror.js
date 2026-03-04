@@ -26,7 +26,6 @@ function fmtTs(ms) {
 }
 
 function getEventTypeLabel(ev) {
-  // 1 = stage, 2 = voice, 3 = external (Discord API)
   const t = Number(ev?.entityType);
   if (t === 3) return "External";
   if (t === 2) return "Voice";
@@ -40,7 +39,6 @@ function getEventLocation(ev) {
     const loc = ev?.entityMetadata?.location;
     return loc ? `📍 ${safeTrim(loc, 140)}` : "";
   }
-
   const chId = String(ev?.channelId || "").trim();
   return chId ? `🔊 <#${chId}>` : "";
 }
@@ -51,28 +49,22 @@ function getEventUrl(ev) {
 }
 
 function shouldMirror(ev) {
-  // mirror stage + voice + external
   const t = Number(ev?.entityType);
   return t === 1 || t === 2 || t === 3;
 }
 
 function getPingText() {
-  // EVENTS_PING_MODE:
-  //  - "everyone" => @everyone
-  //  - "verified" => ping Verified role (ROLE_VERIFIED_ID)
-  //  - "off" / unset => no ping
   const mode = String(process.env.EVENTS_PING_MODE || "off").trim().toLowerCase();
 
   if (mode === "everyone" || mode === "@everyone") return "@everyone";
 
   if (mode === "verified") {
-    const roleId =
-      String(
-        process.env.ROLE_VERIFIED_ID ||
-          process.env.ROLE_VERIFIED ||
-          process.env.VERIFIED_ROLE_ID ||
-          ""
-      ).trim();
+    const roleId = String(
+      process.env.ROLE_VERIFIED_ID ||
+        process.env.ROLE_VERIFIED ||
+        process.env.VERIFIED_ROLE_ID ||
+        ""
+    ).trim();
     return roleId ? `<@&${roleId}>` : "";
   }
 
@@ -91,11 +83,11 @@ async function saveState(state) {
   const events = state.events || {};
   const keys = Object.keys(events);
 
-  if (keys.length > 200) {
+  if (keys.length > 300) {
     const sorted = keys
       .map((k) => ({ k, ts: Number(events[k]?.lastPostedAtMs || 0) }))
       .sort((a, b) => b.ts - a.ts)
-      .slice(0, 200);
+      .slice(0, 300);
 
     const next = {};
     for (const x of sorted) next[x.k] = events[x.k];
@@ -115,9 +107,9 @@ async function sendAnnouncement(client, text) {
 
   if (!ch || !ch.isTextBased()) return { ok: false, reason: "announcements_channel_not_text" };
 
-  await ch.send({ content: text, allowedMentions: { parse: ["everyone", "roles"] } }).catch((e) => {
-    console.log("❌ EVENTS_MIRROR_SEND_FAILED:", e?.message || e);
-  });
+  await ch
+    .send({ content: text, allowedMentions: { parse: ["everyone", "roles"] } })
+    .catch((e) => console.log("❌ EVENTS_MIRROR_SEND_FAILED:", e?.message || e));
 
   return { ok: true };
 }
@@ -151,13 +143,9 @@ function buildLiveMsg(ev) {
   const where = getEventLocation(ev);
   const url = getEventUrl(ev);
 
-  const parts = [
-    ping || "",
-    `🔴 **Event is LIVE** (${type})`,
-    `**${title}**`,
-    where,
-    url,
-  ].filter(Boolean);
+  const parts = [ping || "", `🔴 **Event is LIVE** (${type})`, `**${title}**`, where, url].filter(
+    Boolean
+  );
 
   return parts.join("\n");
 }
@@ -174,6 +162,56 @@ function buildEndedMsg(ev, canceled = false) {
   ].filter(Boolean);
 
   return parts.join("\n");
+}
+
+async function mirrorIfNew(client, ev, reason = "unknown") {
+  try {
+    if (!shouldMirror(ev)) return;
+    const id = String(ev?.id || "").trim();
+    if (!id) return;
+
+    const st = await loadState();
+    if (st.events?.[id]?.lastStatus === "created") return;
+
+    console.log("🔎 EVENTS_MIRROR_SEEN:", {
+      reason,
+      id,
+      entityType: ev?.entityType,
+      name: safeTrim(ev?.name, 80),
+      url: getEventUrl(ev),
+    });
+
+    await sendAnnouncement(client, buildCreatedMsg(ev));
+
+    st.events[id] = { lastStatus: "created", lastPostedAtMs: Date.now() };
+    await saveState(st);
+
+    console.log("✅ EVENTS_MIRROR_POSTED_CREATED:", id);
+  } catch (e) {
+    console.log("❌ EVENTS_MIRROR_MIRRORIFNEW_ERR:", e?.message || e);
+  }
+}
+
+async function pollScheduledEvents(client) {
+  try {
+    for (const [, guild] of client.guilds.cache) {
+      // Fetch scheduled events from API (works even if gateway events are flaky)
+      const events = await guild.scheduledEvents.fetch().catch(() => null);
+      if (!events) continue;
+
+      // Only consider "SCHEDULED" (Discord enum 1) + future events
+      const upcoming = [...events.values()]
+        .filter((ev) => Number(ev?.status) === 1)
+        .sort((a, b) => Number(b?.createdTimestamp || 0) - Number(a?.createdTimestamp || 0))
+        .slice(0, 5);
+
+      for (const ev of upcoming) {
+        await mirrorIfNew(client, ev, "poll");
+      }
+    }
+  } catch (e) {
+    console.log("❌ EVENTS_MIRROR_POLL_ERR:", e?.message || e);
+  }
 }
 
 /**
@@ -197,85 +235,31 @@ function startDiscordEventsMirror(client) {
 
   if (!enabled) return;
 
-  const handlerCreate = async (ev) => {
+  // Gateway handlers (best case)
+  client.on(Events.GuildScheduledEventCreate, async (ev) => {
+    await mirrorIfNew(client, ev, "gateway_create");
+  });
+
+  client.on(Events.GuildScheduledEventUpdate, async (oldEv, newEv) => {
     try {
-      if (!shouldMirror(ev)) return;
-
-      const id = String(ev?.id || "").trim();
-      if (!id) return;
-
-      const st = await loadState();
-
-      // Dedupe: if we already posted for this event id, skip
-      const prev = st.events[id];
-      if (prev?.lastStatus === "created") return;
-
-      console.log("🔎 EVENTS_MIRROR_CREATE_SEEN:", {
-        id,
-        entityType: ev?.entityType,
-        name: safeTrim(ev?.name, 80),
-        url: getEventUrl(ev),
-      });
-
-      await sendAnnouncement(client, buildCreatedMsg(ev));
-
-      st.events[id] = { lastStatus: "created", lastPostedAtMs: Date.now() };
-      await saveState(st);
-
-      console.log("✅ EVENTS_MIRROR_POSTED_CREATED:", id);
-    } catch (e) {
-      console.log("❌ EVENTS_MIRROR_CREATE_ERR:", e?.message || e);
-    }
-  };
-
-  const handlerUpdate = async (oldEv, newEv) => {
-    try {
-      const ev = newEv || oldEv;
-      if (!shouldMirror(ev)) return;
-
-      const id = String(ev?.id || "").trim();
-      if (!id) return;
-
-      // Discord API enum: 1 scheduled, 2 active, 3 completed, 4 canceled
       const prevN = Number(oldEv?.status);
       const curN = Number(newEv?.status);
-
       if (Number.isFinite(prevN) && Number.isFinite(curN) && prevN === curN) return;
 
-      const st = await loadState();
-
-      if (curN === 2) {
-        await sendAnnouncement(client, buildLiveMsg(newEv));
-        st.events[id] = { lastStatus: "live", lastPostedAtMs: Date.now() };
-        await saveState(st);
-        console.log("✅ EVENTS_MIRROR_POSTED_LIVE:", id);
-        return;
-      }
-
-      if (curN === 3) {
-        await sendAnnouncement(client, buildEndedMsg(newEv, false));
-        st.events[id] = { lastStatus: "ended", lastPostedAtMs: Date.now() };
-        await saveState(st);
-        console.log("✅ EVENTS_MIRROR_POSTED_ENDED:", id);
-        return;
-      }
-
-      if (curN === 4) {
-        await sendAnnouncement(client, buildEndedMsg(newEv, true));
-        st.events[id] = { lastStatus: "canceled", lastPostedAtMs: Date.now() };
-        await saveState(st);
-        console.log("✅ EVENTS_MIRROR_POSTED_CANCELED:", id);
-        return;
-      }
+      // 2 = ACTIVE, 3 = COMPLETED, 4 = CANCELED
+      if (curN === 2) await sendAnnouncement(client, buildLiveMsg(newEv));
+      if (curN === 3) await sendAnnouncement(client, buildEndedMsg(newEv, false));
+      if (curN === 4) await sendAnnouncement(client, buildEndedMsg(newEv, true));
     } catch (e) {
       console.log("❌ EVENTS_MIRROR_UPDATE_ERR:", e?.message || e);
     }
-  };
+  });
 
-  client.on(Events.GuildScheduledEventCreate, handlerCreate);
-  client.on(Events.GuildScheduledEventUpdate, handlerUpdate);
+  // Poll fallback (reliable case)
+  setTimeout(() => pollScheduledEvents(client).catch(() => null), 15_000);
+  setInterval(() => pollScheduledEvents(client).catch(() => null), 60_000);
 
-  console.log("✅ Discord Events mirror: ACTIVE");
+  console.log("✅ Discord Events mirror: ACTIVE (gateway + poll fallback)");
 }
 
 module.exports = { startDiscordEventsMirror };
