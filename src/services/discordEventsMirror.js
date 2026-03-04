@@ -69,6 +69,30 @@ function shouldMirror(ev) {
   return t === 1 || t === 2 || t === 3;
 }
 
+function getPingText() {
+  // EVENTS_PING_MODE:
+  //  - "everyone" => @everyone
+  //  - "verified" => ping Verified role (ROLE_VERIFIED_ID)
+  //  - "off" / unset => no ping
+  const mode = String(process.env.EVENTS_PING_MODE || "off").trim().toLowerCase();
+
+  if (mode === "everyone" || mode === "@everyone") return "@everyone";
+
+  if (mode === "verified") {
+    const roleId =
+      String(
+        process.env.ROLE_VERIFIED_ID ||
+          process.env.ROLE_VERIFIED ||
+          process.env.VERIFIED_ROLE_ID ||
+          ""
+      ).trim();
+
+    return roleId ? `<@&${roleId}>` : "";
+  }
+
+  return "";
+}
+
 async function loadState() {
   const row = await getJob(JOB_KEY).catch(() => null);
   const st = row?.state || {};
@@ -114,7 +138,8 @@ async function sendAnnouncement(client, text) {
   return { ok: true };
 }
 
-function buildScheduledMsg(ev) {
+function buildCreatedMsg(ev) {
+  const ping = getPingText();
   const title = safeTrim(ev?.name || "Scheduled Event", 180);
   const type = getEventTypeLabel(ev);
   const when = fmtTs(ev?.scheduledStartTimestamp);
@@ -123,7 +148,8 @@ function buildScheduledMsg(ev) {
   const url = getEventUrl(ev);
 
   const parts = [
-    `⏰ **Event Scheduled** (${type})`,
+    ping || "",
+    `📅 **Discord Event Created** (${type})`,
     `**${title}**`,
     when ? `🗓️ ${when}` : "",
     where,
@@ -135,12 +161,14 @@ function buildScheduledMsg(ev) {
 }
 
 function buildLiveMsg(ev) {
+  const ping = getPingText();
   const title = safeTrim(ev?.name || "Live Event", 180);
   const type = getEventTypeLabel(ev);
   const where = getEventLocation(ev);
   const url = getEventUrl(ev);
 
   const parts = [
+    ping || "",
     `🔴 **Event is LIVE** (${type})`,
     `**${title}**`,
     where,
@@ -170,6 +198,10 @@ function buildEndedMsg(ev, canceled = false) {
  *   DISCORD_EVENTS_MIRROR_ENABLED=true
  * Requires:
  *   ANNOUNCEMENTS_CHANNEL_ID
+ *
+ * Optional:
+ *   EVENTS_PING_MODE=everyone|verified|off
+ *   ROLE_VERIFIED_ID (only if EVENTS_PING_MODE=verified)
  */
 function startDiscordEventsMirror(client) {
   const enabled = getBoolEnv("DISCORD_EVENTS_MIRROR_ENABLED", false);
@@ -177,6 +209,7 @@ function startDiscordEventsMirror(client) {
   console.log("✅ DISCORD_EVENTS_MIRROR_BOOT", {
     enabled,
     announcementsSet: Boolean(String(process.env.ANNOUNCEMENTS_CHANNEL_ID || "").trim()),
+    pingMode: String(process.env.EVENTS_PING_MODE || "off"),
   });
 
   if (!enabled) return;
@@ -205,11 +238,11 @@ function startDiscordEventsMirror(client) {
       const prev = st.events[id];
       if (prev?.lastStatus === "scheduled") return;
 
-      await sendAnnouncement(client, buildScheduledMsg(ev));
+      await sendAnnouncement(client, buildCreatedMsg(ev));
       st.events[id] = { lastStatus: "scheduled", lastPostedAtMs: Date.now() };
       await saveState(st);
 
-      console.log("✅ EVENTS_MIRROR_POSTED_SCHEDULED:", id);
+      console.log("✅ EVENTS_MIRROR_POSTED_CREATED:", id);
     } catch (e) {
       console.log("❌ EVENTS_MIRROR_CREATE_ERR:", e?.message || e);
     }
@@ -231,10 +264,10 @@ function startDiscordEventsMirror(client) {
       if (prevStatus === curStatus) return;
 
       if (curStatus === "scheduled") {
-        await sendAnnouncement(client, buildScheduledMsg(newEv));
+        await sendAnnouncement(client, buildCreatedMsg(newEv));
         st.events[id] = { lastStatus: "scheduled", lastPostedAtMs: Date.now() };
         await saveState(st);
-        console.log("✅ EVENTS_MIRROR_POSTED_SCHEDULED(update):", id);
+        console.log("✅ EVENTS_MIRROR_POSTED_CREATED(update):", id);
         return;
       }
 
