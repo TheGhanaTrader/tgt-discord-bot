@@ -383,6 +383,144 @@ function startPaystackWebhookServer() {
     return payload;
   }
 
+  // -------------------- Google Drive OAuth (FOR BACKUPS) --------------------
+  function makeGoogleOAuthState() {
+    // reuse same signing secret; separate nonce so it can't be replayed long-term
+    const payload = {
+      kind: "gdrive",
+      ts: Date.now(),
+      nonce: crypto.randomBytes(12).toString("hex"),
+    };
+    const b64 = base64UrlEncode(payload);
+    const sig = signState(b64);
+    return `${b64}.${sig}`;
+  }
+
+  function verifyGoogleOAuthState(state) {
+    if (!state || !String(state).includes(".")) return false;
+    const [b64, sig] = String(state).split(".");
+    const expected = signState(b64);
+    if (sig !== expected) return false;
+
+    let payload;
+    try {
+      payload = base64UrlDecode(b64);
+    } catch {
+      return false;
+    }
+    if (payload?.kind !== "gdrive") return false;
+
+    const ageMs = Date.now() - Number(payload.ts || 0);
+    if (ageMs < 0 || ageMs > 10 * 60 * 1000) return false; // 10 minutes
+    return true;
+  }
+
+  async function googleExchangeCodeForTokens(code) {
+    const clientId = String(process.env.GDRIVE_OAUTH_CLIENT_ID || "").trim();
+    const clientSecret = String(process.env.GDRIVE_OAUTH_CLIENT_SECRET || "").trim();
+    const redirectUri = String(process.env.GDRIVE_OAUTH_REDIRECT_URI || "").trim();
+
+    if (!clientId || !clientSecret || !redirectUri) {
+      throw new Error("Missing GDRIVE_OAUTH_CLIENT_ID / SECRET / REDIRECT_URI env vars.");
+    }
+
+    const body = new URLSearchParams();
+    body.set("client_id", clientId);
+    body.set("client_secret", clientSecret);
+    body.set("grant_type", "authorization_code");
+    body.set("code", code);
+    body.set("redirect_uri", redirectUri);
+
+    const r = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const msg = data?.error_description || data?.error || `Google token exchange failed (${r.status})`;
+      throw new Error(msg);
+    }
+
+    return data; // contains access_token, expires_in, refresh_token (first time), scope, token_type
+  }
+
+  // ✅ Start Google OAuth (gets you a refresh token)
+  app.get("/auth/google/start", rateLimit, (req, res) => {
+    try {
+      const clientId = String(process.env.GDRIVE_OAUTH_CLIENT_ID || "").trim();
+      const redirectUri = String(process.env.GDRIVE_OAUTH_REDIRECT_URI || "").trim();
+
+      if (!clientId || !redirectUri) {
+        return res.status(500).send("Missing GDRIVE_OAUTH_CLIENT_ID or GDRIVE_OAUTH_REDIRECT_URI in Railway variables.");
+      }
+
+      // We request only drive.file for least privilege
+      const scope = "https://www.googleapis.com/auth/drive.file";
+
+      const state = makeGoogleOAuthState();
+
+      const u = new URL("https://accounts.google.com/o/oauth2/v2/auth");
+      u.searchParams.set("client_id", clientId);
+      u.searchParams.set("redirect_uri", redirectUri);
+      u.searchParams.set("response_type", "code");
+      u.searchParams.set("scope", scope);
+
+      // IMPORTANT: offline gives refresh_token; prompt=consent forces refresh token on re-auth
+      u.searchParams.set("access_type", "offline");
+      u.searchParams.set("prompt", "consent");
+
+      // optional but good hygiene
+      u.searchParams.set("include_granted_scopes", "true");
+      u.searchParams.set("state", state);
+
+      return res.redirect(302, u.toString());
+    } catch (e) {
+      console.log("GDRIVE_OAUTH_START_ERR:", e?.message || e);
+      return res.status(500).send("Google OAuth start failed.");
+    }
+  });
+
+  // ✅ Google OAuth callback (prints refresh token for Railway env)
+  app.get("/oauth/google/callback", rateLimit, async (req, res) => {
+    try {
+      const code = String(req.query.code || "").trim();
+      const state = String(req.query.state || "").trim();
+
+      if (!code || !state) return res.status(400).send("Missing code/state.");
+      if (!verifyGoogleOAuthState(state)) return res.status(400).send("Invalid or expired state.");
+
+      const tok = await googleExchangeCodeForTokens(code);
+
+      // REFRESH TOKEN ONLY appears on first consent (or if prompt=consent + user hasn't granted / revoked)
+      const refreshToken = String(tok.refresh_token || "").trim();
+
+      if (!refreshToken) {
+        console.log("⚠️ GDRIVE_OAUTH_NO_REFRESH_TOKEN. If you already authorized before, revoke access then retry.");
+        return res
+          .status(200)
+          .send(
+            "Google OAuth completed, but no refresh token was returned. " +
+              "Go to your Google Account > Security > Third-party access, remove this app, then run /auth/google/start again."
+          );
+      }
+
+      console.log("✅ GDRIVE_REFRESH_TOKEN=" + refreshToken);
+      console.log("✅ GDRIVE_TOKEN_SCOPE=" + String(tok.scope || ""));
+      console.log("✅ GDRIVE_TOKEN_EXPIRES_IN=" + String(tok.expires_in || ""));
+
+      return res
+        .status(200)
+        .send(
+          "✅ Google Drive connected. Copy the refresh token from Railway logs (GDRIVE_REFRESH_TOKEN) and paste it into Railway variable: GDRIVE_OAUTH_REFRESH_TOKEN."
+        );
+    } catch (e) {
+      console.log("GDRIVE_OAUTH_CALLBACK_ERR:", e?.message || e);
+      return res.status(500).send("Google OAuth callback failed: " + (e?.message || "unknown"));
+    }
+  });
+
   async function discordExchangeCodeForToken(code, redirectUri) {
     const clientId = process.env.DISCORD_CLIENT_ID;
     const clientSecret = process.env.DISCORD_CLIENT_SECRET;
