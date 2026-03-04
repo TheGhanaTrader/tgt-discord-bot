@@ -568,6 +568,86 @@ function startPaystackWebhookServer() {
     }
   });
 
+  // =========================
+  // ✅ Google Drive OAuth (for refresh token generation)
+  // =========================
+  app.get("/auth/google/start", rateLimit, async (req, res) => {
+    try {
+      const clientId = String(process.env.GDRIVE_OAUTH_CLIENT_ID || "").trim();
+      const clientSecret = String(process.env.GDRIVE_OAUTH_CLIENT_SECRET || "").trim();
+      const redirectUri = String(process.env.GDRIVE_OAUTH_REDIRECT_URI || "").trim();
+
+      if (!clientId || !clientSecret || !redirectUri) {
+        return res
+          .status(500)
+          .send("Missing GDRIVE_OAUTH_CLIENT_ID / GDRIVE_OAUTH_CLIENT_SECRET / GDRIVE_OAUTH_REDIRECT_URI");
+      }
+
+      const { OAuth2Client } = require("google-auth-library");
+      const oauth2Client = new OAuth2Client(clientId, clientSecret, redirectUri);
+
+      const scopes = [
+        "https://www.googleapis.com/auth/drive.file",
+        // If you need full Drive access later, change to:
+        // "https://www.googleapis.com/auth/drive",
+      ];
+
+      const url = oauth2Client.generateAuthUrl({
+        access_type: "offline",      // ✅ required for refresh_token
+        prompt: "consent",           // ✅ forces refresh_token on first time
+        scope: scopes,
+      });
+
+      return res.redirect(302, url);
+    } catch (e) {
+      console.log("GDRIVE_OAUTH_START_ERR:", e?.message || e);
+      return res.status(500).send("Google OAuth start failed");
+    }
+  });
+
+  app.get("/auth/google/callback", rateLimit, async (req, res) => {
+    try {
+      const code = String(req.query.code || "").trim();
+      if (!code) return res.status(400).send("Missing code");
+
+      const clientId = String(process.env.GDRIVE_OAUTH_CLIENT_ID || "").trim();
+      const clientSecret = String(process.env.GDRIVE_OAUTH_CLIENT_SECRET || "").trim();
+      const redirectUri = String(process.env.GDRIVE_OAUTH_REDIRECT_URI || "").trim();
+
+      if (!clientId || !clientSecret || !redirectUri) {
+        return res
+          .status(500)
+          .send("Missing GDRIVE_OAUTH_CLIENT_ID / GDRIVE_OAUTH_CLIENT_SECRET / GDRIVE_OAUTH_REDIRECT_URI");
+      }
+
+      const { OAuth2Client } = require("google-auth-library");
+      const oauth2Client = new OAuth2Client(clientId, clientSecret, redirectUri);
+
+      const { tokens } = await oauth2Client.getToken(code);
+
+      const refreshToken = String(tokens?.refresh_token || "").trim();
+
+      if (!refreshToken) {
+        // This happens if Google didn’t issue one (already authorized before)
+        return res
+          .status(200)
+          .send(
+            "Authorized, but no refresh_token was returned. Go to your Google Account -> Security -> Third-party access, remove access for this app, then try again."
+          );
+      }
+
+      // ✅ Show token so you can copy it into Railway env:
+      return res
+        .status(200)
+        .send(
+          `✅ Google Drive OAuth complete.\n\nGDRIVE_OAUTH_REFRESH_TOKEN=${refreshToken}\n\nCopy this into Railway Variables.`
+        );
+    } catch (e) {
+      console.log("GDRIVE_OAUTH_CALLBACK_ERR:", e?.message || e);
+      return res.status(500).send("Google OAuth callback failed");
+    }
+  });
+
   // ✅ Referral link entry: sets cookie then starts referral-only OAuth bind flow
   app.get("/r", rateLimit, (req, res) => {
     try {
