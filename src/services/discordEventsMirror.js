@@ -237,8 +237,32 @@ function startDiscordEventsMirror(client) {
 
   // Gateway handlers (best case)
   client.on(Events.GuildScheduledEventCreate, async (ev) => {
-    await mirrorIfNew(client, ev, "gateway_create");
-  });
+  try {
+    console.log("🔎 EVENTS_MIRROR_CREATE_FIRED", {
+      id: ev?.id,
+      name: ev?.name,
+      status: ev?.status,
+      entityType: ev?.entityType,
+      scheduledStartTimestamp: ev?.scheduledStartTimestamp,
+      url: ev?.url,
+    });
+
+    const pingMode = String(process.env.EVENTS_PING_MODE || "off").toLowerCase();
+    const ping =
+      pingMode === "everyone"
+        ? "@everyone\n"
+        : pingMode === "verified"
+        ? "<@&" + String(process.env.ROLE_VERIFIED_ID || "").trim() + ">\n"
+        : "";
+
+    const msg = ping + buildScheduledMsg(ev);
+
+    const r = await sendAnnouncement(client, msg);
+    console.log("✅ EVENTS_MIRROR_CREATE_SENT", r);
+  } catch (e) {
+    console.log("❌ EVENTS_MIRROR_CREATE_ERR:", e?.message || e);
+  }
+});
 
   client.on(Events.GuildScheduledEventUpdate, async (oldEv, newEv) => {
     try {
