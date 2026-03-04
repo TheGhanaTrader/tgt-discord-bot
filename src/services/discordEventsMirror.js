@@ -214,6 +214,11 @@ async function pollScheduledEvents(client) {
   }
 }
 
+// Compatibility alias (prevents crash if older handler calls buildScheduledMsg)
+function buildScheduledMsg(ev) {
+  return buildCreatedMsg(ev);
+}
+
 /**
  * Enable by:
  *   DISCORD_EVENTS_MIRROR_ENABLED=true
