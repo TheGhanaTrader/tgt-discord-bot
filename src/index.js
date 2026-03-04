@@ -21,6 +21,12 @@ const { ensureContractGateMessage } = require("./services/contractGatePoster");
 // ✅ DAILY BACKUP (NEW)
 const { startDailyBackupJob } = require("./jobs/dailyBackupJob");
 
+// ✅ Discord Events mirroring (SAFE import; never crash boot if missing)
+let startDiscordEventsMirror = null;
+try {
+  ({ startDiscordEventsMirror } = require("./services/discordEventsMirror"));
+} catch (_) {}
+
 const fs = require("fs");
 const path = require("path");
 
@@ -61,7 +67,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
 
-     // ✅ Needed for Discord Scheduled Events mirroring (safe, additive)
+    // ✅ Needed for Discord Scheduled Events mirroring (safe, additive)
     GatewayIntentBits.GuildScheduledEvents,
   ],
 });
@@ -161,26 +167,24 @@ async function registerCommands(commandsJSON) {
 // ===== READY =====
 client.once(Events.ClientReady, async (c) => {
   try {
-  for (const [guildId, guild] of client.guilds.cache) {
-    const invites = await guild.invites.fetch().catch(() => null);
-    if (!invites) continue;
+    for (const [guildId, guild] of client.guilds.cache) {
+      const invites = await guild.invites.fetch().catch(() => null);
+      if (!invites) continue;
 
-    const m = new Map();
-    invites.forEach((inv) => m.set(inv.code, inv.uses ?? 0));
-    client._inviteCache.set(guildId, m);
+      const m = new Map();
+      invites.forEach((inv) => m.set(inv.code, inv.uses ?? 0));
+      client._inviteCache.set(guildId, m);
+    }
+    console.log("✅ Invite cache primed.");
+  } catch (e) {
+    console.log("INVITE_CACHE_PRIME_ERR:", e?.message || e);
   }
-  console.log("✅ Invite cache primed.");
-} catch (e) {
-  console.log("INVITE_CACHE_PRIME_ERR:", e?.message || e);
-}
 
   setDiscordClient(client);
   await ensureFundedDashboard(client).catch((e) => console.error("FUNDED_DASHBOARD_BOOT_ERR", e));
   await ensurePayoutDashboard(client).catch((e) => console.error("PAYOUT_DASHBOARD_BOOT_ERR", e));
   await ensureGiveawayDashboard(client);
-  await ensureContractGateMessage(client).catch((e) =>
-  console.error("CONTRACT_GATE_BOOT_ERR", e)
-);
+  await ensureContractGateMessage(client).catch((e) => console.error("CONTRACT_GATE_BOOT_ERR", e));
 
   console.log(`✅ Logged in as ${c.user.tag}`);
 
@@ -189,45 +193,49 @@ client.once(Events.ClientReady, async (c) => {
   console.log("🛡️ Monthly scheduler hardening: ACTIVE");
 
   const { startYouTubeRssPoster } = require("./jobs/youtubeRssPoster");
-startYouTubeRssPoster(client);
+  startYouTubeRssPoster(client);
 
-const { startXRssPoster } = require("./jobs/xRssPoster");
-startXRssPoster(client);
+  const { startXRssPoster } = require("./jobs/xRssPoster");
+  startXRssPoster(client);
 
-const { startPodcastRssPoster } = require("./jobs/podcastRssPoster");
-startPodcastRssPoster(client);
+  const { startPodcastRssPoster } = require("./jobs/podcastRssPoster");
+  startPodcastRssPoster(client);
 
   const { upsertWelcomeGateMessage } = require("./gates/welcomeGate");
-await upsertWelcomeGateMessage(client);
-console.log("✅ Welcome Gate posted/updated.");
+  await upsertWelcomeGateMessage(client);
+  console.log("✅ Welcome Gate posted/updated.");
 
-const { upsertUpgradeGateMessage } = require("./gates/upgradeGate");
-await upsertUpgradeGateMessage(client);
-console.log("✅ Upgrade Gate posted/updated.");
+  const { upsertUpgradeGateMessage } = require("./gates/upgradeGate");
+  await upsertUpgradeGateMessage(client);
+  console.log("✅ Upgrade Gate posted/updated.");
 
-const { upsertRulesMessage } = require("./gates/rulesGate");
-const { upsertOperateMessage } = require("./gates/operateGate");
+  const { upsertRulesMessage } = require("./gates/rulesGate");
+  const { upsertOperateMessage } = require("./gates/operateGate");
 
-if (process.env.RULES_CHANNEL_ID) await upsertRulesMessage(client);
-if (process.env.OPERATE_CHANNEL_ID) await upsertOperateMessage(client);
-console.log("✅ Pins managed: welcome/upgrade/rules/operate");
+  if (process.env.RULES_CHANNEL_ID) await upsertRulesMessage(client);
+  if (process.env.OPERATE_CHANNEL_ID) await upsertOperateMessage(client);
+  console.log("✅ Pins managed: welcome/upgrade/rules/operate");
 
-// ✅ DAILY BACKUP (NEW) — start once after bot is fully ready
-startDailyBackupJob(client);
+  // ✅ DAILY BACKUP (NEW) — start once after bot is fully ready
+  startDailyBackupJob(client);
 
-// ✅ Leaderboard dashboards (auto-post + auto-pin + auto-refresh)
-const { startLeaderboardDashboards } = require("./services/leaderboards");
-startLeaderboardDashboards(client, { everyMs: 60_000 }); // 60s refresh
+  // ✅ Leaderboard dashboards (auto-post + auto-pin + auto-refresh)
+  const { startLeaderboardDashboards } = require("./services/leaderboards");
+  startLeaderboardDashboards(client, { everyMs: 60_000 }); // 60s refresh
 
-// 🔁 Start subscription expiry + reminder monitor
-startSubscriptionMonitor(client, {
-  TIERS: getTiers(),
-  LOG_CHANNEL_ID: process.env.BILLING_LOG_CHANNEL_ID || process.env.LOG_CHANNEL_ID,
-  DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID,
-});
+  // 🔁 Start subscription expiry + reminder monitor
+  startSubscriptionMonitor(client, {
+    TIERS: getTiers(),
+    LOG_CHANNEL_ID: process.env.BILLING_LOG_CHANNEL_ID || process.env.LOG_CHANNEL_ID,
+    DISCORD_GUILD_ID: process.env.DISCORD_GUILD_ID,
+  });
 
-// ✅ Discord Events -> Announcements mirroring (OFF by default)
-  startDiscordEventsMirror(client);
+  // ✅ Discord Events -> Announcements mirroring (OFF by default)
+  if (typeof startDiscordEventsMirror === "function") {
+    startDiscordEventsMirror(client);
+  } else {
+    console.log("ℹ️ Discord Events mirroring: SKIPPED (module not loaded)");
+  }
 });
 
 client.on("guildMemberAdd", async (member) => {
@@ -342,14 +350,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
           } catch (_) {}
         }
 
-        const contractUrl =
-          "https://discord.com/channels/1449315468694392844/1449315470133170308";
+        const contractUrl = "https://discord.com/channels/1449315468694392844/1449315470133170308";
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setStyle(ButtonStyle.Link)
-            .setLabel("Open Contract Gate")
-            .setURL(contractUrl)
+          new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel("Open Contract Gate").setURL(contractUrl)
         );
 
         return interaction.reply({
@@ -377,10 +381,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
         url.searchParams.set("tier", tier);
 
         const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder()
-            .setStyle(ButtonStyle.Link)
-            .setLabel(`Proceed to Paystack (${tier})`)
-            .setURL(url.toString())
+          new ButtonBuilder().setStyle(ButtonStyle.Link).setLabel(`Proceed to Paystack (${tier})`).setURL(url.toString())
         );
 
         return interaction.reply({
@@ -402,21 +403,21 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (!command) return interaction.reply({ content: "Unknown command.", ephemeral: true });
 
     await command.execute(interaction);
-    } catch (e) {
-  console.error("[INTERACTIONS] crash:", e?.message || e);
-  console.error("[INTERACTIONS] stack:", e?.stack || e);
+  } catch (e) {
+    console.error("[INTERACTIONS] crash:", e?.message || e);
+    console.error("[INTERACTIONS] stack:", e?.stack || e);
 
-  // ✅ Prevent "This interaction failed"
-  try {
-    if (interaction.deferred) {
-      await interaction.editReply({ content: "❌ Something went wrong. Try again." });
-    } else if (interaction.replied) {
-      await interaction.followUp({ content: "❌ Something went wrong. Try again.", ephemeral: true });
-    } else {
-      await interaction.reply({ content: "❌ Something went wrong. Try again.", ephemeral: true });
-    }
-  } catch (_) {}
-} 
+    // ✅ Prevent "This interaction failed"
+    try {
+      if (interaction.deferred) {
+        await interaction.editReply({ content: "❌ Something went wrong. Try again." });
+      } else if (interaction.replied) {
+        await interaction.followUp({ content: "❌ Something went wrong. Try again.", ephemeral: true });
+      } else {
+        await interaction.reply({ content: "❌ Something went wrong. Try again.", ephemeral: true });
+      }
+    } catch (_) {}
+  }
 });
 
 // ===== BOOT =====
